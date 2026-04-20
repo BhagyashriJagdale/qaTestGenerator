@@ -1,0 +1,25 @@
+# Core
+anthropic>=0.18.0
+openai>=1.30.0
+fastapi>=0.109.0
+uvicorn>=0.27.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# RAG & Vector Store
+chromadb>=0.4.22
+sentence-transformers>=2.3.0
+
+# Tools & Integrations
+httpx>=0.26.0
+jira>=3.5.0
+PyYAML>=6.0.1
+
+# Utilities
+python-dotenv>=1.0.0
+rich>=13.7.0
+tenacity>=8.2.3
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
