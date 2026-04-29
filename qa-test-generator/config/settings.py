@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     # Provider selection
-    llm_provider: str = Field(default="openai", description="LLM provider: 'openai', 'anthropic', or 'huggingface'")
+    llm_provider: str = Field(default="openai", description="LLM provider: 'openai', 'anthropic', 'deepseek', or 'huggingface'")
 
     # OpenAI API
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API Key")
@@ -22,6 +22,9 @@ class Settings(BaseSettings):
 
     # Anthropic API (optional, used when llm_provider=anthropic)
     anthropic_api_key: Optional[str] = Field(default=None, description="Anthropic API Key")
+
+    # DeepSeek API (optional, used when llm_provider=deepseek)
+    deepseek_api_key: Optional[str] = Field(default=None, description="DeepSeek API Key")
     
     # RAG Configuration
     chroma_persist_dir: str = Field(default="./data/chroma", description="ChromaDB persistence directory")

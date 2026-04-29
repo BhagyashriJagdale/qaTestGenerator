@@ -23,6 +23,9 @@ from rag import get_rag_system
 
 console = Console()
 
+PIPELINE_MAX_LOOPS = 2   # max feedback iterations after the first run (total runs = 3)
+SCORE_THRESHOLD   = 75.0 # stop early when score reaches this
+
 
 class TestGeneratorPipeline:
     """
@@ -69,42 +72,100 @@ class TestGeneratorPipeline:
         if config is None:
             config = GenerationConfig()
         
-        # Print header
         self._print_header(requirement)
-        
-        # Step 1: Planner Agent
+
+        # ── Step 1: Initial Planner analysis ──────────────────────────────────
         rag_context = None
         if self.use_rag and self.rag:
             rag_context = self._get_initial_rag_context(requirement)
-        
+
         analysis = self.planner.run(requirement, rag_context=rag_context)
-        
-        # Step 2: Get enhanced RAG context based on analysis
-        if self.use_rag and self.rag:
-            rag_context = self.rag.get_context_for_generation(
-                feature_name=analysis.feature_name,
-                domain=analysis.domain,
-                intent=analysis.intent
+
+        # Track the best result across all iterations
+        best: dict = {
+            "score": -1.0,
+            "manual_tests": [],
+            "api_tests": [],
+            "ui_tests": [],
+            "review": None,
+            "analysis": analysis,
+        }
+
+        # ── Feedback loop: Generator → Reviewer → Planner (refine) ───────────
+        total_iterations = PIPELINE_MAX_LOOPS + 1
+        for iteration in range(1, total_iterations + 1):
+            self._print_loop_header(iteration, total_iterations)
+
+            # Enhanced RAG context from current analysis
+            if self.use_rag and self.rag:
+                rag_context = self.rag.get_context_for_generation(
+                    feature_name=analysis.feature_name,
+                    domain=analysis.domain,
+                    intent=analysis.intent
+                )
+
+            # Generator
+            manual_tests, api_tests, ui_tests = self.generator.run(
+                requirement=requirement,
+                analysis=analysis,
+                config=config,
+                rag_context=rag_context,
+                tool_context=tool_context
             )
-        
-        # Step 3: Generator Agent
-        manual_tests, api_tests, ui_tests = self.generator.run(
-            requirement=requirement,
-            analysis=analysis,
-            config=config,
-            rag_context=rag_context,
-            tool_context=tool_context
-        )
-        
-        # Step 4: Review Agent
-        review = self.reviewer.run(
-            analysis=analysis,
-            manual_tests=manual_tests,
-            api_tests=api_tests,
-            ui_tests=ui_tests
-        )
-        
-        # Step 5: Formatter Agent
+
+            # Reviewer
+            review = self.reviewer.run(
+                analysis=analysis,
+                manual_tests=manual_tests,
+                api_tests=api_tests,
+                ui_tests=ui_tests
+            )
+
+            # Keep track of the highest-scoring result
+            if review.final_score > best["score"]:
+                best.update({
+                    "score": review.final_score,
+                    "manual_tests": manual_tests,
+                    "api_tests": api_tests,
+                    "ui_tests": ui_tests,
+                    "review": review,
+                    "analysis": analysis,
+                })
+                console.print(
+                    f"[green]  ✓ New best score: {review.final_score:.1f}% "
+                    f"(iteration {iteration})[/green]"
+                )
+
+            # Stop early if quality threshold reached
+            if review.final_score >= SCORE_THRESHOLD:
+                console.print(
+                    f"[green]Score {review.final_score:.1f}% ≥ threshold "
+                    f"{SCORE_THRESHOLD}% — stopping early.[/green]"
+                )
+                break
+
+            # No more refinement passes after last iteration
+            if iteration == total_iterations:
+                console.print(
+                    f"[yellow]Max iterations ({total_iterations}) reached — "
+                    f"using best result (score: {best['score']:.1f}%).[/yellow]"
+                )
+                break
+
+            # Feed review feedback back to Planner for a refined analysis
+            self._print_feedback_summary(review, iteration)
+            analysis = self.planner.refine(
+                requirement, analysis, review, rag_context=rag_context
+            )
+
+        # ── Use best result ───────────────────────────────────────────────────
+        manual_tests = best["manual_tests"]
+        api_tests    = best["api_tests"]
+        ui_tests     = best["ui_tests"]
+        review       = best["review"]
+        analysis     = best["analysis"]
+
+        # ── Formatter ─────────────────────────────────────────────────────────
         markdown_output = self.formatter.run(
             analysis=analysis,
             manual_tests=manual_tests,
@@ -112,8 +173,7 @@ class TestGeneratorPipeline:
             ui_tests=ui_tests,
             review=review
         )
-        
-        # Build final output
+
         result = GeneratedTestSuite(
             feature_name=analysis.feature_name,
             generated_at=datetime.now(),
@@ -124,16 +184,48 @@ class TestGeneratorPipeline:
             review=review,
             markdown_output=markdown_output
         )
-        
-        # Store in RAG for future use
+
         if self.use_rag and self.rag:
             self._store_in_rag(result)
-        
-        # Print summary
+
         self._print_summary(result)
-        
         return result
     
+    def _print_loop_header(self, iteration: int, total: int) -> None:
+        """Print a banner marking the start of each pipeline iteration."""
+        console.print("\n")
+        console.print(Panel(
+            f"[bold white]Iteration {iteration} of {total}[/bold white]\n"
+            f"[cyan]Planner → Generator → Reviewer[/cyan]"
+            + (f"\n[dim](feedback loop — refining analysis from previous review)[/dim]"
+               if iteration > 1 else ""),
+            title=f"🔄 Pipeline Loop {iteration}/{total}",
+            border_style="cyan"
+        ))
+
+    def _print_feedback_summary(self, review, iteration: int) -> None:
+        """Print which review feedback is being passed back to the Planner."""
+        console.print(f"\n[bold yellow]{'='*50}[/bold yellow]")
+        console.print(f"[bold yellow]FEEDBACK LOOP — Passing Review to Planner[/bold yellow]")
+        console.print(f"[bold yellow]Iteration {iteration} score: {review.final_score:.1f}% "
+                      f"(threshold: {SCORE_THRESHOLD}%)[/bold yellow]")
+        console.print(f"[bold yellow]{'='*50}[/bold yellow]")
+
+        if review.coverage.coverage_gaps:
+            console.print("[yellow]  Coverage gaps to address:[/yellow]")
+            for gap in review.coverage.coverage_gaps:
+                console.print(f"    • {gap}")
+
+        if review.issues_found:
+            console.print("[yellow]  Issues to fix:[/yellow]")
+            for issue in review.issues_found:
+                console.print(f"    • {issue}")
+
+        if review.coverage.suggestions:
+            console.print("[yellow]  Suggestions:[/yellow]")
+            for suggestion in review.coverage.suggestions:
+                console.print(f"    • {suggestion}")
+
     def _get_initial_rag_context(self, requirement: RequirementInput) -> str:
         """Get initial RAG context based on requirement."""
         if not self.rag:

@@ -17,6 +17,35 @@ from rich.panel import Panel
 console = Console()
 
 
+def _prompt_requirement() -> str:
+    """
+    Interactively prompt the user to type or paste a requirement description.
+    Accepts multi-line input — press Enter on a blank line to finish.
+    """
+    console.print(Panel(
+        "[bold cyan]Interactive Requirement Input[/bold cyan]\n\n"
+        "Type or paste your requirement below.\n"
+        "Accepted formats:\n"
+        "  • Plain description  — describe the feature in your own words\n"
+        "  • User Story         — As a [role] I want [goal] so that [benefit]\n"
+        "  • Acceptance Criteria — list of must/should/shall statements\n\n"
+        "[dim]Press Enter on a blank line when done.[/dim]",
+        border_style="cyan"
+    ))
+
+    lines: list[str] = []
+    try:
+        while True:
+            line = input()
+            if line == "" and lines:
+                break
+            lines.append(line)
+    except EOFError:
+        pass
+
+    return "\n".join(lines).strip()
+
+
 def cmd_generate(args):
     """Generate test cases from a requirement."""
     from pipeline import generate_test_cases
@@ -24,12 +53,14 @@ def cmd_generate(args):
     
     # Get requirement text
     if args.file:
-        requirement_text = Path(args.file).read_text()
+        requirement_text = Path(args.file).read_text().strip()
+    elif args.requirement:
+        requirement_text = args.requirement.strip()
     else:
-        requirement_text = args.requirement
-    
+        requirement_text = _prompt_requirement()
+
     if not requirement_text:
-        console.print("[red]Error: No requirement provided[/red]")
+        console.print("[red]Error: No requirement provided.[/red]")
         sys.exit(1)
     
     # Parse scenarios
@@ -151,18 +182,24 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Generate test cases from inline requirement
+  # Interactive mode — type or paste your description when prompted
+  python main.py generate
+
+  # Inline description (plain text)
   python main.py generate "User can login with email and password"
-  
-  # Generate from file
-  python main.py generate -f requirements.txt -o tests.md
-  
+
+  # User story inline
+  python main.py generate "As a shopper I want to add products to my cart so that I can buy them later" -t user_story
+
+  # Acceptance criteria from a file
+  python main.py generate -f requirements.txt -t acceptance_criteria -o tests.md
+
   # Generate only API tests
   python main.py generate "Login API" --no-manual --no-ui
-  
+
   # Start API server
   python main.py server --port 8080
-  
+
   # View RAG stats
   python main.py rag-stats
         """

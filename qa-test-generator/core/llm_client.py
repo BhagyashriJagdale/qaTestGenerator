@@ -150,6 +150,71 @@ class ClaudeClient(BaseLLMClient):
         return response.content[0].text
 
 
+class DeepSeekClient(BaseLLMClient):
+    """DeepSeek LLM client — uses the OpenAI-compatible API at api.deepseek.com."""
+
+    DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+    def __init__(self):
+        import openai
+        settings = get_settings()
+        self.client = openai.OpenAI(
+            api_key=settings.deepseek_api_key,
+            base_url=self.DEEPSEEK_BASE_URL,
+        )
+        self.model = settings.model_name or "deepseek-chat"
+        self.max_tokens = settings.max_tokens
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def generate(self, system_prompt, user_message, temperature=0.7, max_tokens=None) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        return response.choices[0].message.content
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def generate_json(self, system_prompt, user_message, temperature=0.3, max_tokens=None) -> dict:
+        json_system_prompt = (
+            f"{system_prompt}\n\n"
+            "IMPORTANT: You must respond with valid JSON only. No markdown, no explanation, just the JSON object."
+        )
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": json_system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        text = response.choices[0].message.content.strip()
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        return json.loads(text.strip())
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
+        all_messages = [{"role": "system", "content": system_prompt}] + messages
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            temperature=temperature,
+            messages=all_messages,
+        )
+        return response.choices[0].message.content
+
+
 class TransformersClient(BaseLLMClient):
     """Local HuggingFace Transformers client — no API key required."""
 
@@ -238,10 +303,12 @@ def get_llm_client() -> BaseLLMClient:
             _client = OpenAIClient()
         elif provider == "anthropic":
             _client = ClaudeClient()
+        elif provider == "deepseek":
+            _client = DeepSeekClient()
         elif provider == "huggingface":
             _client = TransformersClient()
         else:
-            raise ValueError(f"Unsupported LLM_PROVIDER: '{provider}'. Use 'openai', 'anthropic', or 'huggingface'.")
+            raise ValueError(f"Unsupported LLM_PROVIDER: '{provider}'. Use 'openai', 'anthropic', 'deepseek', or 'huggingface'.")
     return _client
 
 
