@@ -68,7 +68,7 @@ class GeneratorAgent(BaseAgent):
         
         # Generate test cases
         try:
-            result = self._generate_json(full_message, temperature=0.5, max_tokens=8000)
+            result = self._generate_json(full_message, temperature=0.1, max_tokens=8000)
             
             manual_tests = self._parse_manual_tests(result.get("manual_test_cases", []))
             api_tests = self._parse_automation_tests(
