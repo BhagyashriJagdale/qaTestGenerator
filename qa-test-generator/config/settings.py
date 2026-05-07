@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     # Anthropic API (optional, used when llm_provider=anthropic)
     anthropic_api_key: Optional[str] = Field(default=None, description="Anthropic API Key")
+    openai_base_url: Optional[str] = Field(default=None, description="OpenAI API base URL (for Groq etc)")
     
     # RAG Configuration
     chroma_persist_dir: str = Field(default="./data/chroma", description="ChromaDB persistence directory")
@@ -30,10 +31,10 @@ class Settings(BaseSettings):
     # Jira Integration (Optional)
     jira_url: Optional[str] = Field(default=None, description="Jira instance URL")
     jira_email: Optional[str] = Field(default=None, description="Jira account email")
-    jira_api_token: Optional[str] = Field(default=None, description="Jira API token")
+    jira_api_token: Optional[str] = Field(default=None, description="Jira API token")$
     
     # API Configuration
-    api_host: str = Field(default="0.0.0.0", description="API host")
+    api_host: str = Field(default="192.168.0.86", description="API host")
     api_port: int = Field(default=8000, description="API port")
     debug: bool = Field(default=False, description="Debug mode")
     
