@@ -45,12 +45,17 @@ class BaseLLMClient(ABC):
 class OpenAIClient(BaseLLMClient):
     """OpenAI (or compatible) LLM client."""
 
-    def __init__(self):
-        import openai
-        settings = get_settings()
-        self.client = openai.OpenAI(api_key=settings.openai_api_key)
-        self.model = settings.model_name
-        self.max_tokens = settings.max_tokens
+def __init__(self):
+    import openai
+    import os
+    settings = get_settings()
+    base_url = os.environ.get("OPENAI_BASE_URL", None)
+    self.client = openai.OpenAI(
+        api_key=settings.openai_api_key,
+        base_url=base_url
+    )
+    self.model = settings.model_name
+    self.max_tokens = settings.max_tokens
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def generate(self, system_prompt, user_message, temperature=0.7, max_tokens=None) -> str:
