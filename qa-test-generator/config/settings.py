@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # Jira Integration (Optional)
     jira_url: Optional[str] = Field(default=None, description="Jira instance URL")
     jira_email: Optional[str] = Field(default=None, description="Jira account email")
-    jira_api_token: Optional[str] = Field(default=None, description="Jira API token")$
+    jira_api_token: Optional[str] = Field(default=None, description="Jira API token")
     
     # API Configuration
     api_host: str = Field(default="192.168.0.86", description="API host")
