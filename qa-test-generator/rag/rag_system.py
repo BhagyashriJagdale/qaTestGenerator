@@ -67,17 +67,25 @@ class RAGSystem:
                 metadata={"description": "QA test cases and domain knowledge"}
             )
             
-            # Initialize embedding model
-            self._embedding_model = SentenceTransformer(self.settings.embedding_model)
+            # Initialize embedding model — prefer local cache, fall back to download once
+            try:
+                self._embedding_model = SentenceTransformer(
+                    self.settings.embedding_model,
+                    local_files_only=True,
+                )
+            except Exception:
+                console.print(f"[yellow]Embedding model not cached — downloading once: {self.settings.embedding_model}[/yellow]")
+                self._embedding_model = SentenceTransformer(self.settings.embedding_model)
             
             self._initialized = True
             console.print("[green]✓ RAG system initialized[/green]")
             
         except ImportError as e:
-            console.print(f"[yellow]RAG dependencies not installed: {e}[/yellow]")
-            console.print("[yellow]RAG features will be disabled[/yellow]")
+            console.print(f"[yellow]⚠ RAG dependencies not installed: {e}[/yellow]")
+            console.print("[yellow]  RAG features are disabled — install chromadb and sentence-transformers to enable.[/yellow]")
         except Exception as e:
-            console.print(f"[yellow]Could not initialize RAG: {e}[/yellow]")
+            console.print(f"[yellow]⚠ RAG initialisation failed: {e}[/yellow]")
+            console.print("[yellow]  Generation will continue without RAG context.[/yellow]")
     
     def add_document(
         self,

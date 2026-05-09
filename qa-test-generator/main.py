@@ -21,6 +21,7 @@ def cmd_generate(args):
     """Generate test cases from a requirement."""
     from pipeline import generate_test_cases
     from core.models import GenerationConfig, ScenarioType
+    from agents.planner_agent import InvalidRequirementError, IncompleteRequirementError
     
     # Get requirement text
     if args.file:
@@ -56,14 +57,23 @@ def cmd_generate(args):
     )
     
     # Run generation
-    result = generate_test_cases(
-        requirement_text=requirement_text,
-        input_type=args.type,
-        project_context=args.context,
-        tech_stack=args.tech,
-        use_rag=not args.no_rag,
-        config=config
-    )
+    try:
+        result = generate_test_cases(
+            requirement_text=requirement_text,
+            input_type=args.type,
+            project_context=args.context,
+            tech_stack=args.tech,
+            use_rag=not args.no_rag,
+            config=config
+        )
+    except InvalidRequirementError as e:
+        console.print(f"\n[bold red]✗ Invalid Requirement[/bold red]")
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    except IncompleteRequirementError as e:
+        console.print(f"\n[bold yellow]✗ Incomplete Requirement[/bold yellow]")
+        console.print(f"[yellow]{e}[/yellow]")
+        sys.exit(1)
     
     # Output
     if args.output:
