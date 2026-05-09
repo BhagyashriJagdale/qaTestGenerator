@@ -86,7 +86,8 @@ class OpenAIClient(BaseLLMClient):
                 {"role": "user", "content": user_message},
             ],
         )
-        return json.loads(response.choices[0].message.content)
+        """return json.loads(response.choices[0].message.content)"""
+        return _parse_json_safe(response.choices[0].message.content)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
