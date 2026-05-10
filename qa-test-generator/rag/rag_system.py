@@ -7,6 +7,7 @@ import os
 from typing import Optional
 from config import get_settings
 from rich.console import Console
+from .context_scorer import score_and_trim, RELEVANCE_THRESHOLD, MAX_CONTEXT_CHARS
 
 console = Console()
 
@@ -258,59 +259,49 @@ class RAGSystem:
         feature_name: str,
         domain: str,
         intent: str,
-        n_results: int = 3
+        n_results: int = 5,
+        relevance_threshold: float = RELEVANCE_THRESHOLD,
+        max_chars: int = MAX_CONTEXT_CHARS,
     ) -> str:
         """
-        Get formatted context for test case generation.
-        
+        Get relevance-filtered context for test case generation.
+
+        Retrieves candidate chunks from ChromaDB then uses the vector
+        distance scores (already computed) to drop irrelevant chunks and
+        cap total context size before LLM injection — no extra LLM calls.
+
         Args:
             feature_name: Name of the feature
             domain: Domain/module
             intent: What the feature does
-            n_results: Number of results per query
-            
+            n_results: Candidate chunks to fetch per category before filtering
+            relevance_threshold: Max ChromaDB distance to keep a chunk (lower = stricter)
+            max_chars: Hard cap on total context characters injected into the prompt
+
         Returns:
-            Formatted context string
+            Relevance-filtered, budget-capped context string
         """
-        # Build search query
         query = f"{feature_name} {domain} {intent}"
-        
-        # Search for relevant test cases
-        test_cases = self.search(
-            query=query,
-            n_results=n_results,
-            filter_type="test_case"
+
+        test_cases = self.search(query=query, n_results=n_results, filter_type="test_case")
+        knowledge = self.search(query=query, n_results=n_results, filter_type="domain_knowledge")
+
+        context, stats = score_and_trim(
+            test_case_chunks=test_cases,
+            knowledge_chunks=knowledge,
+            threshold=relevance_threshold,
+            max_chars=max_chars,
         )
-        
-        # Search for domain knowledge
-        knowledge = self.search(
-            query=query,
-            n_results=n_results,
-            filter_type="domain_knowledge"
-        )
-        
-        # Format context
-        context_parts = []
-        
-        if test_cases:
-            context_parts.append("### Similar Test Cases")
-            for i, doc in enumerate(test_cases, 1):
-                meta = doc['metadata']
-                context_parts.append(f"""
-**Example {i}** (Feature: {meta.get('feature', 'N/A')}, Type: {meta.get('test_type', 'N/A')})
-{doc['content'][:500]}{'...' if len(doc['content']) > 500 else ''}
-""")
-        
-        if knowledge:
-            context_parts.append("\n### Domain Knowledge")
-            for doc in knowledge:
-                meta = doc['metadata']
-                context_parts.append(f"""
-**{meta.get('knowledge_type', 'Info').title()}** ({meta.get('domain', 'General')})
-{doc['content']}
-""")
-        
-        return "\n".join(context_parts) if context_parts else ""
+
+        if stats["before_filter"] > 0:
+            dropped = stats["before_filter"] - stats["after_filter"]
+            console.print(
+                f"[dim]  RAG context: {stats['before_filter']} chunks retrieved, "
+                f"{dropped} dropped (irrelevant), "
+                f"{stats['chars_used']} chars injected[/dim]"
+            )
+
+        return context
     
     def get_stats(self) -> dict:
         """Get statistics about the knowledge base."""

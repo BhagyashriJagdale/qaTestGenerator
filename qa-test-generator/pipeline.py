@@ -20,6 +20,7 @@ from agents import (
     FormatterAgent,
 )
 from rag import get_rag_system
+from rag.context_scorer import filter_by_relevance
 
 console = Console()
 
@@ -315,23 +316,25 @@ class TestGeneratorPipeline:
         )
 
     def _get_initial_rag_context(self, requirement: RequirementInput) -> str:
-        """Get initial RAG context based on requirement."""
+        """Get relevance-filtered initial RAG context based on requirement."""
         if not self.rag:
             return ""
-        
-        # Simple keyword search on requirement content
-        results = self.rag.search(
-            query=requirement.content[:500],  # First 500 chars
-            n_results=3
-        )
-        
-        if not results:
+
+        results = self.rag.search(query=requirement.content[:500], n_results=5)
+        relevant = filter_by_relevance(results)
+
+        if not relevant:
             return ""
-        
+
         context_parts = ["### Related Context from Knowledge Base"]
-        for doc in results:
-            context_parts.append(f"- {doc['content'][:200]}...")
-        
+        chars = len(context_parts[0])
+        for doc in relevant:
+            snippet = f"- {doc['content'][:200]}..."
+            if chars + len(snippet) > 1000:
+                break
+            context_parts.append(snippet)
+            chars += len(snippet)
+
         return "\n".join(context_parts)
     
     def _store_in_rag(self, result: GeneratedTestSuite) -> None:

@@ -4,6 +4,7 @@ Second agent in the pipeline.
 Makes three separate LLM calls (manual / API / UI) to avoid token-limit truncation.
 """
 
+import concurrent.futures
 from typing import Optional
 from .base_agent import BaseAgent
 from .prompts import GENERATOR_SYSTEM_PROMPT
@@ -61,26 +62,35 @@ class GeneratorAgent(BaseAgent):
         ui_tests: list[AutomationTestCase] = []
         failures: list[str] = []
 
-        # --- Call 1: Manual test cases ---
-        if config.include_manual:
-            console.print("\n[cyan]  → Generating manual test cases...[/cyan]")
-            result, err = self._generate_manual(full_base)
+        # Submit all enabled generation tasks in parallel — each is independent blocking I/O
+        enabled: dict[str, concurrent.futures.Future] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            if config.include_manual:
+                console.print("\n[cyan]  → Generating manual test cases...[/cyan]")
+                enabled["manual"] = pool.submit(self._generate_manual, full_base)
+            if config.include_api:
+                console.print("[cyan]  → Generating API automation scripts...[/cyan]")
+                enabled["api"] = pool.submit(self._generate_api, full_base)
+            if config.include_ui:
+                console.print("[cyan]  → Generating UI automation scripts...[/cyan]")
+                enabled["ui"] = pool.submit(self._generate_ui, full_base)
+            # Block here until all submitted futures complete
+            concurrent.futures.wait(enabled.values())
+
+        if "manual" in enabled:
+            result, err = enabled["manual"].result()
             manual_tests = result
             if err:
                 failures.append(f"Manual: {err}")
 
-        # --- Call 2: API automation ---
-        if config.include_api:
-            console.print("\n[cyan]  → Generating API automation scripts...[/cyan]")
-            result, err = self._generate_api(full_base)
+        if "api" in enabled:
+            result, err = enabled["api"].result()
             api_tests = result
             if err:
                 failures.append(f"API: {err}")
 
-        # --- Call 3: UI automation ---
-        if config.include_ui:
-            console.print("\n[cyan]  → Generating UI automation scripts...[/cyan]")
-            result, err = self._generate_ui(full_base)
+        if "ui" in enabled:
+            result, err = enabled["ui"].result()
             ui_tests = result
             if err:
                 failures.append(f"UI: {err}")
