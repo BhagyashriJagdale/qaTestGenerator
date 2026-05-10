@@ -47,8 +47,13 @@ class OpenAIClient(BaseLLMClient):
 
     def __init__(self):
         import openai
+        import os
         settings = get_settings()
-        self.client = openai.OpenAI(api_key=settings.openai_api_key)
+        base_url = os.environ.get("OPENAI_BASE_URL", None)
+        self.client = openai.OpenAI(
+            api_key=settings.openai_api_key,
+            base_url=base_url
+        )
         self.model = settings.model_name
         self.max_tokens = settings.max_tokens
 
@@ -81,7 +86,8 @@ class OpenAIClient(BaseLLMClient):
                 {"role": "user", "content": user_message},
             ],
         )
-        return json.loads(response.choices[0].message.content)
+        """return json.loads(response.choices[0].message.content)"""
+        return _parse_json_safe(response.choices[0].message.content)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
@@ -148,6 +154,64 @@ class ClaudeClient(BaseLLMClient):
             temperature=temperature,
         )
         return response.content[0].text
+
+
+class DeepSeekClient(BaseLLMClient):
+    """DeepSeek LLM client (OpenAI-compatible API)."""
+
+    DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+    def __init__(self):
+        import openai
+        settings = get_settings()
+        self.client = openai.OpenAI(
+            api_key=settings.deepseek_api_key,
+            base_url=self.DEEPSEEK_BASE_URL,
+        )
+        self.model = settings.model_name
+        self.max_tokens = settings.max_tokens
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def generate(self, system_prompt, user_message, temperature=0.7, max_tokens=None) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        return response.choices[0].message.content
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=6))
+    def generate_json(self, system_prompt, user_message, temperature=0.3, max_tokens=None) -> dict:
+        json_system_prompt = (
+            f"{system_prompt}\n\n"
+            "IMPORTANT: You must respond with valid JSON only. No markdown, no explanation, just the JSON object."
+        )
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": json_system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        return _parse_json_safe(response.choices[0].message.content)
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=6))
+    def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
+        all_messages = [{"role": "system", "content": system_prompt}] + messages
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=max_tokens or self.max_tokens,
+            temperature=temperature,
+            messages=all_messages,
+        )
+        return response.choices[0].message.content
 
 
 class TransformersClient(BaseLLMClient):
@@ -225,6 +289,41 @@ class TransformersClient(BaseLLMClient):
         return self._chat(system_prompt, messages, temperature, max_tokens or self.max_tokens)
 
 
+def _parse_json_safe(text: str) -> dict:
+    """
+    Parse JSON from an LLM response, recovering from common issues:
+    - Markdown fences (```json ... ```)
+    - Truncated output (unterminated strings/arrays) — salvages whatever keys are complete
+    """
+    text = text.strip()
+    for fence in ("```json", "```"):
+        if text.startswith(fence):
+            text = text[len(fence):]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Recovery: find the outermost `{` and try progressively shorter substrings
+    start = text.find("{")
+    if start == -1:
+        raise ValueError(f"No JSON object found in response: {text[:200]}")
+
+    candidate = text[start:]
+    # Try closing open structures by truncating at the last complete top-level value
+    for end in range(len(candidate), 0, -1):
+        try:
+            return json.loads(candidate[:end])
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError(f"Could not recover valid JSON from response: {text[:200]}")
+
+
 _client: Optional[BaseLLMClient] = None
 
 
@@ -240,8 +339,10 @@ def get_llm_client() -> BaseLLMClient:
             _client = ClaudeClient()
         elif provider == "huggingface":
             _client = TransformersClient()
+        elif provider == "deepseek":
+            _client = DeepSeekClient()
         else:
-            raise ValueError(f"Unsupported LLM_PROVIDER: '{provider}'. Use 'openai', 'anthropic', or 'huggingface'.")
+            raise ValueError(f"Unsupported LLM_PROVIDER: '{provider}'. Use 'openai', 'anthropic', 'deepseek', or 'huggingface'.")
     return _client
 
 

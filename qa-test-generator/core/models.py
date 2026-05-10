@@ -167,7 +167,10 @@ class GeneratedTestSuite(BaseModel):
     api_test_cases: list[AutomationTestCase] = Field(default=[], description="API automation tests")
     ui_test_cases: list[AutomationTestCase] = Field(default=[], description="UI automation tests")
     review: Optional[ReviewResult] = Field(default=None, description="Review results")
-    markdown_output: str = Field(default="", description="Formatted markdown output")
+    markdown_output: str = Field(default="", description="Combined formatted markdown output")
+    manual_output: str = Field(default="", description="Manual test cases markdown (for UI tab)")
+    api_output: str = Field(default="", description="API automation scripts markdown (for UI tab)")
+    ui_output: str = Field(default="", description="UI automation scripts markdown (for UI tab)")
     
     class Config:
         json_encoders = {

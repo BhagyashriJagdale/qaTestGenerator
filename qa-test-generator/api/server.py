@@ -9,6 +9,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
+import asyncio
 import uuid
 
 from config import get_settings
@@ -20,6 +21,7 @@ from core.models import (
 )
 from pipeline import TestGeneratorPipeline, RequirementInput
 from rag import get_rag_system
+from agents.planner_agent import InvalidRequirementError, IncompleteRequirementError
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -31,13 +33,23 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://qagen-automata.vercel.app",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory job storage (use Redis in production)
+# In-memory job storage — jobs are lost on server restart.
+# For production, replace with Redis or a database-backed store.
+import logging
+logging.getLogger(__name__).warning(
+    "Using in-memory job store. All jobs will be lost on server restart. "
+    "Set up Redis or a persistent store for production."
+)
 jobs: dict[str, dict] = {}
 
 
@@ -69,6 +81,9 @@ class GenerateResponse(BaseModel):
     total_test_cases: int = 0
     quality_score: float = 0.0
     markdown_output: Optional[str] = None
+    manual_output: Optional[str] = None   # Manual Test Cases tab
+    api_output: Optional[str] = None      # Playwright API tab
+    ui_output: Optional[str] = None       # Playwright UI tab
     created_at: datetime
 
 
@@ -164,27 +179,41 @@ async def generate_test_cases(request: GenerateRequest):
             scenarios=scenarios
         )
         
-        # Run pipeline
+        # Run pipeline in a thread so the async event loop is not blocked
         pipeline = TestGeneratorPipeline(use_rag=request.use_rag)
-        result = pipeline.run(requirement, config=config)
-        
-        # Calculate totals
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, pipeline.run, requirement, config)
+
         total = (
             len(result.manual_test_cases) +
             len(result.api_test_cases) +
             len(result.ui_test_cases)
         )
-        
+        final_score = result.review.final_score if result.review else 0.0
+
         return GenerateResponse(
             job_id=str(uuid.uuid4()),
             status="completed",
             feature_name=result.feature_name,
             total_test_cases=total,
-            quality_score=result.review.final_score,
+            quality_score=final_score,
             markdown_output=result.markdown_output,
-            created_at=result.generated_at
+            manual_output=result.manual_output or None,
+            api_output=result.api_output or None,
+            ui_output=result.ui_output or None,
+            created_at=result.generated_at,
         )
-        
+
+    except InvalidRequirementError as e:
+        raise HTTPException(status_code=422, detail={"error": "invalid_requirement", "message": str(e)})
+    except IncompleteRequirementError as e:
+        raise HTTPException(status_code=422, detail={
+            "error": "incomplete_requirement",
+            "message": str(e),
+            "issues": e.issues,
+            "missing_information": e.missing,
+            "suggestion": e.suggestion,
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -284,70 +313,79 @@ async def get_knowledge_stats():
 # ============================================
 
 async def _run_generation_job(job_id: str, request: GenerateRequest):
-    """Run generation job in background."""
+    """Run generation job in background thread so the event loop stays free."""
     try:
         jobs[job_id]["status"] = "running"
-        jobs[job_id]["progress"] = 10
-        
-        # Parse inputs
+        jobs[job_id]["progress"] = 5
+
         try:
             input_type = InputType(request.input_type)
         except ValueError:
             input_type = InputType.PLAIN_TEXT
-        
+
         scenarios = []
         for s in request.scenarios:
             try:
                 scenarios.append(ScenarioType(s))
             except ValueError:
                 pass
-        
-        jobs[job_id]["progress"] = 20
-        
-        # Create requirement and config
+
+        jobs[job_id]["progress"] = 10
+
         requirement = RequirementInput(
             content=request.requirement,
             input_type=input_type,
             project_context=request.project_context,
-            tech_stack=request.tech_stack
+            tech_stack=request.tech_stack,
         )
-        
         config = GenerationConfig(
             include_manual=request.include_manual,
             include_api=request.include_api,
             include_ui=request.include_ui,
-            scenarios=scenarios or [ScenarioType.HAPPY_PATH, ScenarioType.NEGATIVE]
+            scenarios=scenarios or [ScenarioType.HAPPY_PATH, ScenarioType.NEGATIVE],
         )
-        
-        jobs[job_id]["progress"] = 30
-        
-        # Run pipeline
+
+        jobs[job_id]["progress"] = 15
+
+        def _progress(pct: int):
+            jobs[job_id]["progress"] = pct
+
+        # Run pipeline in a thread — each LLM call is blocking I/O
         pipeline = TestGeneratorPipeline(use_rag=request.use_rag)
-        result = pipeline.run(requirement, config=config)
-        
-        jobs[job_id]["progress"] = 90
-        
-        # Calculate totals
+        loop = asyncio.get_event_loop()
+
+        _progress(20)  # planning
+        result = await loop.run_in_executor(None, pipeline.run, requirement, config)
+        _progress(90)  # formatting done
+
         total = (
             len(result.manual_test_cases) +
             len(result.api_test_cases) +
             len(result.ui_test_cases)
         )
-        
-        # Store result
+        final_score = result.review.final_score if result.review else 0.0
+
         jobs[job_id]["result"] = GenerateResponse(
             job_id=job_id,
             status="completed",
             feature_name=result.feature_name,
             total_test_cases=total,
-            quality_score=result.review.final_score,
+            quality_score=final_score,
             markdown_output=result.markdown_output,
-            created_at=result.generated_at
+            manual_output=result.manual_output or None,
+            api_output=result.api_output or None,
+            ui_output=result.ui_output or None,
+            created_at=result.generated_at,
         )
-        
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["progress"] = 100
-        
+
+    except InvalidRequirementError as e:
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["error"] = f"Invalid requirement: {e}"
+    except IncompleteRequirementError as e:
+        jobs[job_id]["status"] = "failed"
+        jobs[job_id]["error"] = f"Incomplete requirement: {e}"
     except Exception as e:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)

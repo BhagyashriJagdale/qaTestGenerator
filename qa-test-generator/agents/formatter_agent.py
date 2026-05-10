@@ -142,6 +142,15 @@ class FormatterAgent(BaseAgent):
 
 **Coverage:** {coverage_str}"""
     
+    def format_manual_section(self, tests: list[ManualTestCase]) -> str:
+        return self._format_manual_section(tests)
+
+    def format_api_section(self, tests: list[AutomationTestCase]) -> str:
+        return self._format_api_section(tests)
+
+    def format_ui_section(self, tests: list[AutomationTestCase]) -> str:
+        return self._format_ui_section(tests)
+
     def _format_manual_section(self, tests: list[ManualTestCase]) -> str:
         """Format manual test cases section."""
         lines = ["## 1. Manual Test Cases", ""]
