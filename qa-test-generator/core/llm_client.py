@@ -4,6 +4,7 @@ Provider is selected via the LLM_PROVIDER environment variable.
 """
 
 import json
+import threading
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -86,7 +87,6 @@ class OpenAIClient(BaseLLMClient):
                 {"role": "user", "content": user_message},
             ],
         )
-        """return json.loads(response.choices[0].message.content)"""
         return _parse_json_safe(response.choices[0].message.content)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
@@ -135,14 +135,7 @@ class ClaudeClient(BaseLLMClient):
             messages=[{"role": "user", "content": user_message}],
             temperature=temperature,
         )
-        text = response.content[0].text.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        return json.loads(text.strip())
+        return _parse_json_safe(response.content[0].text)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
@@ -294,6 +287,9 @@ def _parse_json_safe(text: str) -> dict:
     Parse JSON from an LLM response, recovering from common issues:
     - Markdown fences (```json ... ```)
     - Truncated output (unterminated strings/arrays) — salvages whatever keys are complete
+
+    Recovery strategy is O(n) scan + at most 20 parse attempts, avoiding the O(n²)
+    cost of trying every possible end position.
     """
     text = text.strip()
     for fence in ("```json", "```"):
@@ -308,16 +304,20 @@ def _parse_json_safe(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Recovery: find the outermost `{` and try progressively shorter substrings
+    # Recovery: find the outermost `{` in the response
     start = text.find("{")
     if start == -1:
         raise ValueError(f"No JSON object found in response: {text[:200]}")
 
     candidate = text[start:]
-    # Try closing open structures by truncating at the last complete top-level value
-    for end in range(len(candidate), 0, -1):
+
+    # Scan once for closing brace positions — O(n) — then try the last 20 in reverse.
+    # This covers the common truncation case (cut off mid-string or mid-array) without
+    # the O(n²) cost of trying every character position.
+    close_positions = [i for i, c in enumerate(candidate) if c == "}"]
+    for pos in reversed(close_positions[-20:]):
         try:
-            return json.loads(candidate[:end])
+            return json.loads(candidate[: pos + 1])
         except json.JSONDecodeError:
             continue
 
@@ -325,24 +325,30 @@ def _parse_json_safe(text: str) -> dict:
 
 
 _client: Optional[BaseLLMClient] = None
+_client_lock = threading.Lock()
 
 
 def get_llm_client() -> BaseLLMClient:
-    """Return a singleton LLM client based on LLM_PROVIDER setting."""
+    """Return a singleton LLM client based on LLM_PROVIDER setting (thread-safe)."""
     global _client
     if _client is None:
-        settings = get_settings()
-        provider = settings.llm_provider.lower()
-        if provider == "openai":
-            _client = OpenAIClient()
-        elif provider == "anthropic":
-            _client = ClaudeClient()
-        elif provider == "huggingface":
-            _client = TransformersClient()
-        elif provider == "deepseek":
-            _client = DeepSeekClient()
-        else:
-            raise ValueError(f"Unsupported LLM_PROVIDER: '{provider}'. Use 'openai', 'anthropic', 'deepseek', or 'huggingface'.")
+        with _client_lock:
+            if _client is None:  # double-checked locking
+                settings = get_settings()
+                provider = settings.llm_provider.lower()
+                if provider == "openai":
+                    _client = OpenAIClient()
+                elif provider == "anthropic":
+                    _client = ClaudeClient()
+                elif provider == "huggingface":
+                    _client = TransformersClient()
+                elif provider == "deepseek":
+                    _client = DeepSeekClient()
+                else:
+                    raise ValueError(
+                        f"Unsupported LLM_PROVIDER: '{provider}'. "
+                        "Use 'openai', 'anthropic', 'deepseek', or 'huggingface'."
+                    )
     return _client
 
 

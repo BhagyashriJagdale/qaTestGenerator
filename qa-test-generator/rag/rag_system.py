@@ -4,6 +4,7 @@ Uses ChromaDB for vector storage and sentence-transformers for embeddings.
 """
 
 import os
+import threading
 from typing import Optional
 from config import get_settings
 from rich.console import Console
@@ -117,7 +118,7 @@ class RAGSystem:
             # Generate ID if not provided
             if doc_id is None:
                 import hashlib
-                doc_id = hashlib.md5(content.encode()).hexdigest()[:12]
+                doc_id = hashlib.sha256(content.encode()).hexdigest()[:16]
             
             # Add to collection
             self._collection.add(
@@ -321,13 +322,16 @@ class RAGSystem:
             return {"status": "error", "error": str(e)}
 
 
-# Singleton instance
+# Singleton instance (thread-safe)
 _rag_system: Optional[RAGSystem] = None
+_rag_lock = threading.Lock()
 
 
 def get_rag_system() -> RAGSystem:
-    """Get or create RAG system singleton."""
+    """Get or create RAG system singleton (thread-safe)."""
     global _rag_system
     if _rag_system is None:
-        _rag_system = RAGSystem()
+        with _rag_lock:
+            if _rag_system is None:
+                _rag_system = RAGSystem()
     return _rag_system

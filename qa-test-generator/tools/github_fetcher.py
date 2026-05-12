@@ -115,6 +115,11 @@ class GitHubContextFetcher:
         resp = self._session.get(url, timeout=30)
         resp.raise_for_status()
         data = resp.json()
+        if data.get("truncated"):
+            console.print(
+                f"[yellow]  ⚠ GitHub tree response was truncated for {owner}/{repo} "
+                "(repo too large). Context will be based on a partial file list.[/yellow]"
+            )
         return [
             item["path"]
             for item in data.get("tree", [])
@@ -137,8 +142,8 @@ class GitHubContextFetcher:
                     truncated = content[:_MAX_CHARS_PER_FILE]
                     results.append((path, truncated))
                     total_chars += len(truncated)
-            except Exception:
-                continue  # skip unreadable files silently
+            except Exception as exc:
+                console.print(f"[dim]  Skipping {path}: {exc}[/dim]")
 
         return results
 
@@ -183,28 +188,24 @@ def _parse_repo_url(url: str) -> tuple[str, str]:
 def _rank_files(paths: list[str]) -> list[str]:
     """
     Return paths sorted by relevance tier, excluding non-code and skip directories.
-    Highest-priority files come first.
+    Highest-priority files come first. Priority is computed once per path (not twice).
     """
     def _priority(path: str) -> int:
         lower = path.lower()
-        # Skip unwanted directories
         parts = path.split("/")
         if any(p in _SKIP_DIRS for p in parts):
             return 99
-
-        # Skip irrelevant extensions
         ext = "." + path.rsplit(".", 1)[-1] if "." in path else ""
         if ext not in _RELEVANT_EXTS:
             return 99
-
         for tier, keywords in _PRIORITY_TIERS:
             if any(kw in lower for kw in keywords):
                 return tier
-
         return 6  # relevant extension but no keyword match
 
-    ranked = sorted(paths, key=_priority)
-    return [p for p in ranked if _priority(p) < 99]
+    # Score once, sort once — avoid calling _priority twice per path
+    scored = [(p, _priority(p)) for p in paths]
+    return [p for p, prio in sorted(scored, key=lambda x: x[1]) if prio < 99]
 
 
 def _build_context_string(

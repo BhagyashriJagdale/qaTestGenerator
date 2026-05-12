@@ -320,12 +320,14 @@ Rules:
     # ------------------------------------------------------------------
 
     def _normalize_ids(self, tests: list, prefix: str) -> list:
-        """Re-assign sequential IDs with the correct type prefix regardless of what the LLM generated."""
+        """Re-assign sequential IDs with the correct type prefix. Returns a new list."""
+        result = []
         for i, test in enumerate(tests, start=1):
             correct_id = f"{prefix}-{i:03d}"
             if test.test_case_id != correct_id:
-                tests[i - 1] = test.model_copy(update={"test_case_id": correct_id})
-        return tests
+                test = test.model_copy(update={"test_case_id": correct_id})
+            result.append(test)
+        return result
 
     # ------------------------------------------------------------------
     # Parsers
