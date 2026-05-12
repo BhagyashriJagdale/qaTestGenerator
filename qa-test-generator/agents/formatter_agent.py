@@ -5,7 +5,6 @@ Fourth and final agent in the pipeline.
 
 from datetime import datetime
 from .base_agent import BaseAgent
-from .prompts import FORMATTER_SYSTEM_PROMPT
 from core.models import (
     PlannerAnalysis,
     ManualTestCase,
@@ -26,7 +25,7 @@ class FormatterAgent(BaseAgent):
     def __init__(self):
         super().__init__(
             name="Formatter Agent",
-            system_prompt=FORMATTER_SYSTEM_PROMPT
+            system_prompt=""  # Formatter works deterministically — no LLM calls made
         )
     
     def run(
@@ -84,15 +83,15 @@ class FormatterAgent(BaseAgent):
         
         # Manual Test Cases
         if manual_tests:
-            sections.append(self._format_manual_section(manual_tests))
-        
+            sections.append(self.format_manual_section(manual_tests))
+
         # API Automation
         if api_tests:
-            sections.append(self._format_api_section(api_tests))
-        
+            sections.append(self.format_api_section(api_tests))
+
         # UI Automation
         if ui_tests:
-            sections.append(self._format_ui_section(ui_tests))
+            sections.append(self.format_ui_section(ui_tests))
         
         # Coverage Report
         sections.append(self._format_coverage_section(review))
@@ -143,118 +142,127 @@ class FormatterAgent(BaseAgent):
 **Coverage:** {coverage_str}"""
     
     def format_manual_section(self, tests: list[ManualTestCase]) -> str:
-        return self._format_manual_section(tests)
-
-    def format_api_section(self, tests: list[AutomationTestCase]) -> str:
-        return self._format_api_section(tests)
-
-    def format_ui_section(self, tests: list[AutomationTestCase]) -> str:
-        return self._format_ui_section(tests)
-
-    def _format_manual_section(self, tests: list[ManualTestCase]) -> str:
         """Format manual test cases section."""
         lines = ["## 1. Manual Test Cases", ""]
-        
+
         for test in tests:
             lines.append(f"### {test.test_case_id}: {test.title}")
             lines.append("")
             lines.append(f"**Priority:** {test.priority.value.title()} | **Type:** {test.scenario_type.value.replace('_', ' ').title()}")
             lines.append("")
-            
+
             if test.description:
                 lines.append(f"*{test.description}*")
                 lines.append("")
-            
+
             if test.preconditions:
                 lines.append("**Preconditions:**")
                 for pre in test.preconditions:
                     lines.append(f"- {pre}")
                 lines.append("")
-            
+
             lines.append("**Steps:**")
             lines.append("")
-            lines.append("| Step | Action | Expected Result |")
-            lines.append("|------|--------|-----------------|")
+            lines.append("| Step | Action | Test Data | Expected Result |")
+            lines.append("|------|--------|-----------|-----------------|")
             for step in test.steps:
                 action = step.action.replace("|", "\\|")
                 expected = step.expected_result.replace("|", "\\|")
-                lines.append(f"| {step.step_number} | {action} | {expected} |")
+                data = (step.test_data or "—").replace("|", "\\|")
+                lines.append(f"| {step.step_number} | {action} | {data} | {expected} |")
             lines.append("")
-            
+
             if test.postconditions:
                 lines.append("**Postconditions:**")
                 for post in test.postconditions:
                     lines.append(f"- {post}")
                 lines.append("")
-            
+
             lines.append("---")
             lines.append("")
-        
+
         return "\n".join(lines)
-    
-    def _format_api_section(self, tests: list[AutomationTestCase]) -> str:
+
+    def format_api_section(self, tests: list[AutomationTestCase]) -> str:
         """Format API automation section."""
         lines = ["## 2. API Automation Test Scripts", ""]
         lines.append("**Framework:** Playwright (TypeScript)")
         lines.append("")
-        
+
         # Group by file
         files: dict[str, list[AutomationTestCase]] = {}
         for test in tests:
             if test.file_name not in files:
                 files[test.file_name] = []
             files[test.file_name].append(test)
-        
+
         for file_name, file_tests in files.items():
             lines.append(f"### File: `tests/api/{file_name}`")
             lines.append("")
-            
-            # Combine all code into one block
+
             combined_code = []
-            for test in file_tests:
-                combined_code.append(f"// {test.test_case_id}: {test.title}")
-                combined_code.append(test.code)
+            for i, test in enumerate(file_tests):
+                refs = f" — Covers: {', '.join(test.manual_test_refs)}" if test.manual_test_refs else ""
+                combined_code.append(f"// {test.test_case_id}: {test.title}{refs}")
+                # Keep imports only from the first code block to avoid duplicate import lines
+                code = test.code if i == 0 else self._strip_imports(test.code)
+                combined_code.append(code)
                 combined_code.append("")
-            
+
             lines.append("```typescript")
             lines.append("\n".join(combined_code))
             lines.append("```")
             lines.append("")
-        
+
         lines.append("---")
         return "\n".join(lines)
-    
-    def _format_ui_section(self, tests: list[AutomationTestCase]) -> str:
+
+    def format_ui_section(self, tests: list[AutomationTestCase]) -> str:
         """Format UI automation section."""
         lines = ["## 3. UI Automation Test Scripts", ""]
         lines.append("**Framework:** Playwright (TypeScript)")
         lines.append("")
-        
+
         # Group by file
         files: dict[str, list[AutomationTestCase]] = {}
         for test in tests:
             if test.file_name not in files:
                 files[test.file_name] = []
             files[test.file_name].append(test)
-        
+
         for file_name, file_tests in files.items():
             lines.append(f"### File: `tests/ui/{file_name}`")
             lines.append("")
-            
-            # Combine all code into one block
+
             combined_code = []
-            for test in file_tests:
-                combined_code.append(f"// {test.test_case_id}: {test.title}")
-                combined_code.append(test.code)
+            for i, test in enumerate(file_tests):
+                refs = f" — Covers: {', '.join(test.manual_test_refs)}" if test.manual_test_refs else ""
+                combined_code.append(f"// {test.test_case_id}: {test.title}{refs}")
+                # Keep imports only from the first code block to avoid duplicate import lines
+                code = test.code if i == 0 else self._strip_imports(test.code)
+                combined_code.append(code)
                 combined_code.append("")
-            
+
             lines.append("```typescript")
             lines.append("\n".join(combined_code))
             lines.append("```")
             lines.append("")
-        
+
         lines.append("---")
         return "\n".join(lines)
+
+    def _strip_imports(self, code: str) -> str:
+        """Remove TypeScript import lines from a code block.
+
+        Used when concatenating multiple test code blocks into one file so that
+        import statements from subsequent blocks don't duplicate the first block's imports.
+        """
+        lines = code.split("\n")
+        filtered = [line for line in lines if not line.strip().startswith("import ")]
+        # Drop leading blank lines left after import removal
+        while filtered and not filtered[0].strip():
+            filtered.pop(0)
+        return "\n".join(filtered)
     
     def _format_coverage_section(self, review: ReviewResult) -> str:
         """Format coverage report section."""

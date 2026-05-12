@@ -82,11 +82,12 @@ class BaseAgent(ABC):
             Complete context string
         """
         parts = [base_message]
-        
+
         if rag_context:
             parts.append(f"\n\n## RELEVANT CONTEXT FROM KNOWLEDGE BASE:\n{rag_context}")
-        
+
         if tool_context:
             parts.append(f"\n\n## ADDITIONAL CONTEXT FROM TOOLS:\n{tool_context}")
-        
-        return "\n".join(parts)
+
+        # Parts after the first already start with \n\n — join with "" to avoid triple newlines
+        return "".join(parts)

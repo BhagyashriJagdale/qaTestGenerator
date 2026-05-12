@@ -63,6 +63,10 @@ class GenerateRequest(BaseModel):
     input_type: str = Field(default="plain_text", description="Type of input")
     project_context: Optional[str] = Field(default=None, description="Project context")
     tech_stack: Optional[str] = Field(default=None, description="Technology stack")
+    github_repo_url: Optional[str] = Field(
+        default=None,
+        description="GitHub repository URL — the pipeline fetches routes, models, and components to ground test cases in the actual codebase"
+    )
     include_manual: bool = Field(default=True, description="Generate manual tests")
     include_api: bool = Field(default=True, description="Generate API tests")
     include_ui: bool = Field(default=True, description="Generate UI tests")
@@ -168,9 +172,10 @@ async def generate_test_cases(request: GenerateRequest):
             content=request.requirement,
             input_type=input_type,
             project_context=request.project_context,
-            tech_stack=request.tech_stack
+            tech_stack=request.tech_stack,
+            github_repo_url=request.github_repo_url or None,
         )
-        
+
         # Create config
         config = GenerationConfig(
             include_manual=request.include_manual,
@@ -178,7 +183,7 @@ async def generate_test_cases(request: GenerateRequest):
             include_ui=request.include_ui,
             scenarios=scenarios
         )
-        
+
         # Run pipeline in a thread so the async event loop is not blocked
         pipeline = TestGeneratorPipeline(use_rag=request.use_rag)
         loop = asyncio.get_event_loop()
@@ -337,6 +342,7 @@ async def _run_generation_job(job_id: str, request: GenerateRequest):
             input_type=input_type,
             project_context=request.project_context,
             tech_stack=request.tech_stack,
+            github_repo_url=request.github_repo_url or None,
         )
         config = GenerationConfig(
             include_manual=request.include_manual,

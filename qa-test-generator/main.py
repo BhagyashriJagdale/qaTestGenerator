@@ -64,7 +64,8 @@ def cmd_generate(args):
             project_context=args.context,
             tech_stack=args.tech,
             use_rag=not args.no_rag,
-            config=config
+            config=config,
+            github_repo_url=args.github_repo or None,
         )
     except InvalidRequirementError as e:
         console.print(f"\n[bold red]✗ Invalid Requirement[/bold red]")
@@ -195,6 +196,11 @@ Examples:
     gen_parser.add_argument("--no-api", action="store_true", help="Skip API tests")
     gen_parser.add_argument("--no-ui", action="store_true", help="Skip UI tests")
     gen_parser.add_argument("--no-rag", action="store_true", help="Disable RAG")
+    gen_parser.add_argument(
+        "--github-repo",
+        metavar="URL",
+        help="GitHub repo URL — fetches routes, models, and components to ground test cases in the real codebase"
+    )
     gen_parser.set_defaults(func=cmd_generate)
     
     # Server command

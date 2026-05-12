@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = Field(default="./data/chroma", description="ChromaDB persistence directory")
     embedding_model: str = Field(default="all-MiniLM-L6-v2", description="Sentence transformer model")
     
+    # GitHub Integration (Optional — increases rate limit from 60 to 5000 req/hr)
+    github_token: Optional[str] = Field(default=None, description="GitHub personal access token")
+
     # Jira Integration (Optional)
     jira_url: Optional[str] = Field(default=None, description="Jira instance URL")
     jira_email: Optional[str] = Field(default=None, description="Jira account email")

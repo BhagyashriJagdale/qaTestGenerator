@@ -60,8 +60,8 @@ class ReviewAgent(BaseAgent):
         
         try:
             result = self._generate_json(user_message, temperature=0.3)
-            review = self._parse_review(result)
-            
+            review = self._parse_review(result, manual_tests, api_tests, ui_tests)
+
             self._log_review(review)
             return review
             
@@ -91,6 +91,9 @@ class ReviewAgent(BaseAgent):
 
 ## GENERATED TEST CASES
 
+NOTE: Automation code below is a **display preview** (first 500 chars). The actual generated code is complete.
+Do NOT flag "..." at the end of a code preview as truncation — that is expected and is NOT an issue.
+
 ### Manual Test Cases ({len(manual_tests)} total)
 {manual_summary}
 
@@ -107,18 +110,24 @@ Provide detailed feedback and a quality score."""
         """Format manual tests for review."""
         if not tests:
             return "No manual tests generated."
-        
+
         lines = []
         for test in tests:
-            lines.append(f"""
-**{test.test_case_id}: {test.title}**
-- Priority: {test.priority.value}
-- Scenario: {test.scenario_type.value}
-- Steps: {len(test.steps)}
-- Preconditions: {len(test.preconditions)}""")
-        
+            # Include first step + test data so reviewer can assess data quality
+            step_sample = ""
+            if test.steps:
+                s = test.steps[0]
+                data_part = f" | Data: {s.test_data}" if s.test_data else ""
+                step_sample = f"\n  Step 1: {s.action[:100]}{data_part}"
+            lines.append(
+                f"\n**{test.test_case_id}: {test.title}**"
+                f"\n- Priority: {test.priority.value} | Scenario: {test.scenario_type.value}"
+                f"\n- Steps: {len(test.steps)} | Preconditions: {len(test.preconditions)}"
+                f"{step_sample}"
+            )
+
         return "\n".join(lines)
-    
+
     def _format_automation_tests(
         self,
         tests: list[AutomationTestCase],
@@ -127,40 +136,62 @@ Provide detailed feedback and a quality score."""
         """Format automation tests for review."""
         if not tests:
             return f"No {test_type} tests generated."
-        
+
         lines = []
         for test in tests:
-            code_preview = test.code[:200] + "..." if len(test.code) > 200 else test.code
-            lines.append(f"""
-**{test.test_case_id}: {test.title}**
-- Priority: {test.priority.value}
-- Scenario: {test.scenario_type.value}
-- File: {test.file_name}
-- Code Preview:
-```typescript
-{code_preview}
-```""")
-        
+            code_preview = test.code[:500] + "..." if len(test.code) > 500 else test.code
+            refs = ", ".join(test.manual_test_refs) if test.manual_test_refs else "none"
+            lines.append(
+                f"\n**{test.test_case_id}: {test.title}**"
+                f"\n- Priority: {test.priority.value} | Scenario: {test.scenario_type.value}"
+                f"\n- File: {test.file_name} | Covers manual: {refs}"
+                f"\n```typescript\n{code_preview}\n```"
+            )
+
         return "\n".join(lines)
     
-    def _parse_review(self, data: dict) -> ReviewResult:
-        """Parse review result from JSON."""
+    def _parse_review(
+        self,
+        data: dict,
+        manual_tests: list[ManualTestCase],
+        api_tests: list[AutomationTestCase],
+        ui_tests: list[AutomationTestCase],
+    ) -> ReviewResult:
+        """Parse review result. Counts are computed from actual lists; qualitative fields come from LLM."""
+        # Compute counts deterministically — LLMs miscount regularly
+        by_type = {
+            "manual": len(manual_tests),
+            "api_automation": len(api_tests),
+            "ui_automation": len(ui_tests),
+        }
+        total = sum(by_type.values())
+
+        by_scenario: dict[str, int] = {}
+        by_priority: dict[str, int] = {}
+        for t in manual_tests + api_tests + ui_tests:
+            st = getattr(t, "scenario_type", None)
+            if st:
+                by_scenario[st.value] = by_scenario.get(st.value, 0) + 1
+            p = getattr(t, "priority", None)
+            if p:
+                by_priority[p.value] = by_priority.get(p.value, 0) + 1
+
         coverage_data = data.get("coverage", {})
         coverage = CoverageReport(
-            total_test_cases=coverage_data.get("total_test_cases", 0),
-            by_type=coverage_data.get("by_type", {}),
-            by_scenario=coverage_data.get("by_scenario", {}),
-            by_priority=coverage_data.get("by_priority", {}),
-            coverage_gaps=coverage_data.get("coverage_gaps", []),
-            suggestions=coverage_data.get("suggestions", []),
-            quality_score=coverage_data.get("quality_score", 0.0)
+            total_test_cases=total,
+            by_type=by_type,
+            by_scenario=by_scenario,
+            by_priority=by_priority,
+            coverage_gaps=coverage_data.get("coverage_gaps", [])[:10],
+            suggestions=coverage_data.get("suggestions", [])[:5],
+            quality_score=coverage_data.get("quality_score", 0.0),
         )
-        
+
         return ReviewResult(
             coverage=coverage,
-            issues_found=data.get("issues_found", []),
-            improvements_made=data.get("improvements_made", []),
-            final_score=data.get("final_score", 0.0)
+            issues_found=data.get("issues_found", [])[:10],
+            improvements_made=data.get("improvements_made", [])[:5],
+            final_score=data.get("final_score", 0.0),
         )
     
     def _log_review(self, review: ReviewResult) -> None:

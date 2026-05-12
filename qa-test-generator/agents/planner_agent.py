@@ -63,12 +63,15 @@ class PlannerAgent(BaseAgent):
         Args:
             requirement: The input requirement to analyze
             rag_context: Optional context from RAG system
+            skip_validation: Skip pre-LLM deterministic checks (used in refinement passes
+                             where the requirement has already been validated)
 
         Returns:
             PlannerAnalysis with structured analysis
 
         Raises:
             InvalidRequirementError: If the input is not a valid software requirement
+            IncompleteRequirementError: If the input is valid but lacks enough detail
         """
         console.print(f"\n[bold blue]{'='*50}[/bold blue]")
         console.print(f"[bold blue]PLANNER AGENT[/bold blue]")
@@ -169,17 +172,13 @@ class PlannerAgent(BaseAgent):
                 "Input contains only numbers. Please describe the software feature you want tested."
             )
 
-        # Detect obviously incomplete: single word with no verb or outcome implied
+        # Detect obviously invalid: single word with no context — not incomplete, just not a requirement
         words = text.split()
         if len(words) == 1:
-            raise IncompleteRequirementError(
-                issues=["A single word is not enough to generate meaningful test cases."],
-                missing=[
-                    "Who is the actor? (e.g. 'user', 'admin', 'guest')",
-                    "What action are they performing?",
-                    "What is the expected outcome?",
-                ],
-                suggestion=f"User can {text.lower()} using valid credentials and is redirected to the dashboard on success."
+            raise InvalidRequirementError(
+                f"'{text}' is a single word and not a valid requirement. "
+                "Please describe the feature: who does what, and what the expected outcome is. "
+                f"Example: \"User can {text.lower()} using valid credentials and is redirected to the dashboard on success.\""
             )
 
         # Detect vague action-only patterns: "fix X", "add X", "update X", "test X"
