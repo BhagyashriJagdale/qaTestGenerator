@@ -56,6 +56,7 @@ class RequirementInput(BaseModel):
     project_context: Optional[str] = Field(default=None, description="Project or domain context")
     tech_stack: Optional[str] = Field(default=None, description="Technology stack information")
     additional_context: Optional[str] = Field(default=None, description="Any additional context")
+    github_repo_url: Optional[str] = Field(default=None, description="GitHub repository URL for codebase-grounded test generation")
 
 
 class GenerationConfig(BaseModel):
@@ -129,6 +130,7 @@ class AutomationTestCase(BaseModel):
     code: str = Field(..., description="The automation script code")
     file_name: str = Field(..., description="Suggested file name")
     dependencies: list[str] = Field(default=[], description="Required imports/dependencies")
+    manual_test_refs: list[str] = Field(default=[], description="Manual test case IDs this automation covers")
 
 
 # ============================================

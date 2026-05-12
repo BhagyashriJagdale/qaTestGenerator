@@ -1,7 +1,8 @@
 """
 Generator Agent - Creates test cases based on planner analysis.
 Second agent in the pipeline.
-Makes three separate LLM calls (manual / API / UI) to avoid token-limit truncation.
+Generates manual tests first (sequential), then API and UI automation in parallel,
+passing the manual tests as context so automation scripts align with manual scenarios.
 """
 
 import concurrent.futures
@@ -20,8 +21,8 @@ from rich.console import Console
 
 console = Console()
 
-# Token budget per call — well below DeepSeek / OpenAI limits
-_TOKENS_PER_CALL = 8000
+# Token budget per call — capped to DeepSeek's effective output window (~4096 tokens)
+_TOKENS_PER_CALL = 4000
 
 
 class GeneratorAgent(BaseAgent):
@@ -42,10 +43,16 @@ class GeneratorAgent(BaseAgent):
         analysis: PlannerAnalysis,
         config: GenerationConfig,
         rag_context: Optional[str] = None,
-        tool_context: Optional[str] = None
+        tool_context: Optional[str] = None,
+        existing_manual_tests: Optional[list[ManualTestCase]] = None,
     ) -> tuple[list[ManualTestCase], list[AutomationTestCase], list[AutomationTestCase]]:
         """
-        Generate test cases in three separate LLM calls to prevent truncation.
+        Generate test cases with manual tests first, then API/UI automation using
+        manual test cases as context so automation aligns with manual scenarios.
+
+        Args:
+            existing_manual_tests: Already-generated manual tests to use as context
+                                   when regenerating only API/UI (refinement passes).
 
         Returns:
             Tuple of (manual_tests, api_tests, ui_tests)
@@ -62,38 +69,42 @@ class GeneratorAgent(BaseAgent):
         ui_tests: list[AutomationTestCase] = []
         failures: list[str] = []
 
-        # Submit all enabled generation tasks in parallel — each is independent blocking I/O
+        # Step 1: Generate manual test cases first (sequential) so they can inform automation
+        if config.include_manual:
+            console.print("\n[cyan]  → Generating manual test cases...[/cyan]")
+            manual_result, manual_err = self._generate_manual(full_base)
+            manual_tests = manual_result
+            if manual_err:
+                failures.append(f"Manual: {manual_err}")
+
+        # Determine which manual tests to use as context for automation generation.
+        # Prefer newly generated tests; fall back to existing_manual_tests in refinement passes
+        # so automation always has manual context even when manual regeneration fails.
+        manual_context_tests = manual_tests or existing_manual_tests or []
+        manual_context = self._format_manual_context(manual_context_tests)
+
+        # Step 2: Generate API and UI automation in parallel, both informed by manual test cases
         enabled: dict[str, concurrent.futures.Future] = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            if config.include_manual:
-                console.print("\n[cyan]  → Generating manual test cases...[/cyan]")
-                enabled["manual"] = pool.submit(self._generate_manual, full_base)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             if config.include_api:
-                console.print("[cyan]  → Generating API automation scripts...[/cyan]")
-                enabled["api"] = pool.submit(self._generate_api, full_base)
+                console.print("[cyan]  → Generating API automation scripts (based on manual tests)...[/cyan]")
+                enabled["api"] = pool.submit(self._generate_api, full_base, manual_context)
             if config.include_ui:
-                console.print("[cyan]  → Generating UI automation scripts...[/cyan]")
-                enabled["ui"] = pool.submit(self._generate_ui, full_base)
-            # Block here until all submitted futures complete
+                console.print("[cyan]  → Generating UI automation scripts (based on manual tests)...[/cyan]")
+                enabled["ui"] = pool.submit(self._generate_ui, full_base, manual_context)
             concurrent.futures.wait(enabled.values())
 
-        if "manual" in enabled:
-            result, err = enabled["manual"].result()
-            manual_tests = result
-            if err:
-                failures.append(f"Manual: {err}")
-
         if "api" in enabled:
-            result, err = enabled["api"].result()
-            api_tests = result
-            if err:
-                failures.append(f"API: {err}")
+            api_result, api_err = enabled["api"].result()
+            api_tests = api_result
+            if api_err:
+                failures.append(f"API: {api_err}")
 
         if "ui" in enabled:
-            result, err = enabled["ui"].result()
-            ui_tests = result
-            if err:
-                failures.append(f"UI: {err}")
+            ui_result, ui_err = enabled["ui"].result()
+            ui_tests = ui_result
+            if ui_err:
+                failures.append(f"UI: {ui_err}")
 
         if failures:
             for f in failures:
@@ -140,8 +151,19 @@ Rules:
             console.print(f"[red]Manual generation failed: {e}[/red]")
             return [], str(e)
 
-    def _generate_api(self, base: str) -> tuple[list[AutomationTestCase], Optional[str]]:
-        message = base + """
+    def _generate_api(
+        self, base: str, manual_context: str = ""
+    ) -> tuple[list[AutomationTestCase], Optional[str]]:
+        if manual_context:
+            manual_section = (
+                f"\n\n## MANUAL TEST CASES TO AUTOMATE\n"
+                f"Your API tests MUST cover the same scenarios as these manual test cases.\n"
+                f"Use the same test data, scenario types, and expected outcomes — translated to HTTP status codes and response body assertions.\n"
+                f"{manual_context}"
+            )
+        else:
+            manual_section = ""
+        message = base + manual_section + """
 
 ## YOUR TASK — API AUTOMATION SCRIPTS ONLY
 Generate ONLY Playwright TypeScript API automation tests. Return a JSON object with this exact shape:
@@ -152,10 +174,15 @@ Generate ONLY Playwright TypeScript API automation tests. Return a JSON object w
 ID FORMAT — MANDATORY:
 - Use prefix ATC- for every API test case ID: ATC-001, ATC-002, ATC-003 ...
 - Sequential numbers starting from 001. No other prefix is allowed.
+- "manual_test_refs": REQUIRED on every test — list the MTC-XXX IDs this test automates (e.g. ["MTC-001"]). Empty array is NOT acceptable when manual tests exist.
+- "priority": MUST match the priority of the referenced manual test case exactly.
 
 Rules:
+- Each API test must correspond to a manual test case scenario (happy path, negative, edge case, boundary, security).
+- Use the same test data values from the manual test cases in your API requests.
 - Use Playwright's APIRequestContext.
-- Include all imports at the top of every file.
+- COMPACT CODE REQUIRED: Use a single describe block per file. Reuse the auth token set in beforeAll — do NOT redeclare imports or variables per test.
+- Declare imports once at the top; no repeated import statements inside tests.
 - Every test must be FULLY implemented — no placeholders, no "// TODO".
 - Every test block must be fully closed with all braces — never cut off mid-function.
 - MANDATORY negative scenarios (write a dedicated test for each):
@@ -179,8 +206,19 @@ Rules:
             console.print(f"[red]API generation failed: {e}[/red]")
             return [], str(e)
 
-    def _generate_ui(self, base: str) -> tuple[list[AutomationTestCase], Optional[str]]:
-        message = base + """
+    def _generate_ui(
+        self, base: str, manual_context: str = ""
+    ) -> tuple[list[AutomationTestCase], Optional[str]]:
+        if manual_context:
+            manual_section = (
+                f"\n\n## MANUAL TEST CASES TO AUTOMATE\n"
+                f"Your UI tests MUST cover the same scenarios as these manual test cases.\n"
+                f"Use the same test data, action sequences, and expected outcomes — translated to Playwright page interactions and assertions.\n"
+                f"{manual_context}"
+            )
+        else:
+            manual_section = ""
+        message = base + manual_section + """
 
 ## YOUR TASK — UI AUTOMATION SCRIPTS ONLY
 Generate ONLY Playwright TypeScript UI automation tests. Return a JSON object with this exact shape:
@@ -191,11 +229,16 @@ Generate ONLY Playwright TypeScript UI automation tests. Return a JSON object wi
 ID FORMAT — MANDATORY:
 - Use prefix UTC- for every UI test case ID: UTC-001, UTC-002, UTC-003 ...
 - Sequential numbers starting from 001. No other prefix is allowed.
+- "manual_test_refs": REQUIRED on every test — list the MTC-XXX IDs this test automates (e.g. ["MTC-001"]). Empty array is NOT acceptable when manual tests exist.
+- "priority": MUST match the priority of the referenced manual test case exactly.
 
 Rules:
+- Each UI test must correspond to a manual test case scenario (happy path, negative, edge case, boundary, security).
+- Mirror the manual test steps as Playwright actions using the same test data values.
 - Use Playwright page object model.
+- COMPACT CODE REQUIRED: Use a single describe block per file. Share page setup in beforeEach — do NOT redeclare imports or locator variables per test.
+- Declare imports once at the top; no repeated import statements inside tests.
 - Locators: prefer data-testid, then id, then CSS — NEVER xpath.
-- Include all imports at the top of every file.
 - Every test must be FULLY implemented — no placeholders, no "// assert here".
 - Every test block must be fully closed with all braces — never cut off mid-function.
 - MANDATORY negative scenarios (write a dedicated test for each):
@@ -221,6 +264,32 @@ Rules:
     # ------------------------------------------------------------------
     # Message builders
     # ------------------------------------------------------------------
+
+    def _format_manual_context(
+        self, manual_tests: list[ManualTestCase], max_chars: int = 1500
+    ) -> str:
+        """Serialize manual test cases into a compact context string for automation prompts.
+
+        Capped at max_chars to leave room for code output within the token budget.
+        """
+        if not manual_tests:
+            return ""
+        lines: list[str] = []
+        chars = 0
+        for tc in manual_tests:
+            block: list[str] = [f"\n### {tc.test_case_id}: {tc.title} [{tc.scenario_type.value}]"]
+            for step in tc.steps:
+                data_part = f" [Data: {step.test_data}]" if step.test_data else ""
+                block.append(
+                    f"  Step {step.step_number}: {step.action}{data_part}"
+                    f" → {step.expected_result}"
+                )
+            entry = "\n".join(block)
+            if chars > 0 and chars + len(entry) > max_chars:
+                break
+            lines.append(entry)
+            chars += len(entry)
+        return "\n".join(lines)
 
     def _base_context(
         self,
