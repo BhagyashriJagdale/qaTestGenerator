@@ -170,6 +170,52 @@ def test_run_includes_codebase_note_in_message(planner):
     assert "codebase" in full_msg.lower() or "is_complete=false" in full_msg
 
 
+# ── codebase mismatch detection ──────────────────────────────────────────────
+
+def test_codebase_relevant_true_by_default(planner):
+    planner.client.generate_json = MagicMock(return_value=_VALID_LLM_RESPONSE.copy())
+    planner.run(_req(_VALID_REQ))
+    assert planner.codebase_relevant is True
+
+
+def test_codebase_mismatch_sets_flag_false(planner):
+    planner.client.generate_json = MagicMock(return_value={
+        **_VALID_LLM_RESPONSE,
+        "codebase_relevant": False,
+        "mismatch_reason": "Codebase is a flight booking system; requirement is about auth.",
+    })
+    planner.run(
+        _req(_VALID_REQ),
+        tool_context="## routes/flights.ts\nexport const bookFlight = ...",
+    )
+    assert planner.codebase_relevant is False
+
+
+def test_codebase_mismatch_does_not_raise(planner):
+    # Mismatch should warn but still return a valid PlannerAnalysis
+    planner.client.generate_json = MagicMock(return_value={
+        **_VALID_LLM_RESPONSE,
+        "codebase_relevant": False,
+        "mismatch_reason": "Unrelated codebase.",
+    })
+    result = planner.run(
+        _req(_VALID_REQ),
+        tool_context="## routes/flights.ts\n...",
+    )
+    assert result.feature_name == "User Login"
+
+
+def test_no_mismatch_when_no_codebase(planner):
+    # Without tool_context, codebase_relevant should default True (nothing to mismatch)
+    planner.client.generate_json = MagicMock(return_value={
+        **_VALID_LLM_RESPONSE,
+        "codebase_relevant": False,  # LLM returns false but there's no codebase
+    })
+    planner.run(_req(_VALID_REQ))
+    # codebase_relevant is stored as-is from LLM; pipeline checks has_codebase separately
+    assert planner.codebase_relevant is False  # stored, but pipeline ignores it without tool_context
+
+
 # ── IncompleteRequirementError message ────────────────────────────────────────
 
 def test_incomplete_error_message_contains_issues():

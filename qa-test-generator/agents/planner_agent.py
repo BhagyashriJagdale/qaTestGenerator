@@ -125,7 +125,20 @@ class PlannerAgent(BaseAgent):
                     console.print(f"  [yellow]• {issue}[/yellow]")
                 raise IncompleteRequirementError(issues, missing, suggestion)
 
-        # Step 5: Parse into PlannerAnalysis (drop the extra validation fields the LLM added)
+        # Step 5: Check codebase relevance — expose result so the pipeline can act on it
+        self.codebase_relevant: bool = result.pop("codebase_relevant", True)
+        mismatch_reason: str = result.pop("mismatch_reason", "")
+        if has_codebase and not self.codebase_relevant:
+            console.print(
+                f"[yellow]⚠ GitHub link and requirement are mismatched"
+                + (f": {mismatch_reason}" if mismatch_reason else "")
+                + "[/yellow]"
+            )
+            console.print(
+                "[yellow]  Generating test cases based on given requirement input.[/yellow]"
+            )
+
+        # Step 6: Parse into PlannerAnalysis (drop the extra validation fields the LLM added)
         result.pop("is_valid", None)
         result.pop("is_complete", None)
         result.pop("validation_error", None)

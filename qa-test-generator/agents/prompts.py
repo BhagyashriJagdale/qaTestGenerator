@@ -75,6 +75,8 @@ If valid AND complete, respond with ONLY this JSON:
 {
     "is_valid": true,
     "is_complete": true,
+    "codebase_relevant": true,
+    "mismatch_reason": "",
     "feature_name": "Name of the feature",
     "domain": "Module or domain (e.g., Authentication, Payments, User Management)",
     "intent": "Clear description of what the feature does",
@@ -85,6 +87,15 @@ If valid AND complete, respond with ONLY this JSON:
     "dependencies": ["External services or dependencies"],
     "test_focus_areas": ["Key areas to focus testing on"]
 }
+
+## CODEBASE CONTEXT MATCHING (when codebase/tool context is provided)
+If a GitHub codebase is provided in the context, assess whether it is relevant to the requirement:
+- Set "codebase_relevant": true if the codebase covers the feature described in the requirement
+  (e.g. the requirement is about login and the codebase has auth routes/controllers).
+- Set "codebase_relevant": false if the codebase is clearly unrelated to the requirement
+  (e.g. the requirement is about user authentication but the codebase is a flight booking system).
+- Set "mismatch_reason" to a one-sentence explanation when codebase_relevant is false, otherwise leave it empty.
+- When no codebase is provided, always set "codebase_relevant": true and "mismatch_reason": "".
 
 Be thorough but concise. Extract implicit information from the requirements."""
 
