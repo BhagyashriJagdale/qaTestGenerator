@@ -55,6 +55,7 @@ class PlannerAgent(BaseAgent):
         self,
         requirement: RequirementInput,
         rag_context: Optional[str] = None,
+        tool_context: Optional[str] = None,
         skip_validation: bool = False,
     ) -> PlannerAnalysis:
         """
@@ -63,6 +64,9 @@ class PlannerAgent(BaseAgent):
         Args:
             requirement: The input requirement to analyze
             rag_context: Optional context from RAG system
+            tool_context: Optional codebase / tool context (e.g. GitHub routes + models).
+                          When present, completeness checks are relaxed — the codebase
+                          fills in details that are absent from the requirement text.
             skip_validation: Skip pre-LLM deterministic checks (used in refinement passes
                              where the requirement has already been validated)
 
@@ -72,18 +76,23 @@ class PlannerAgent(BaseAgent):
         Raises:
             InvalidRequirementError: If the input is not a valid software requirement
             IncompleteRequirementError: If the input is valid but lacks enough detail
+                                        (suppressed when codebase context is available)
         """
         console.print(f"\n[bold blue]{'='*50}[/bold blue]")
         console.print(f"[bold blue]PLANNER AGENT[/bold blue]")
         console.print(f"[bold blue]{'='*50}[/bold blue]")
+
+        has_codebase = bool(tool_context)
 
         # Step 1: Pre-LLM deterministic validation (skipped in refinement passes)
         if not skip_validation:
             self._validate_input(requirement)
 
         # Step 2: Build message and call LLM
-        user_message = self._build_user_message(requirement)
-        full_message = self._build_context(user_message, rag_context=rag_context)
+        user_message = self._build_user_message(requirement, has_codebase=has_codebase)
+        full_message = self._build_context(
+            user_message, rag_context=rag_context, tool_context=tool_context
+        )
 
         try:
             result = self._generate_json(full_message, temperature=0.3)
@@ -97,17 +106,39 @@ class PlannerAgent(BaseAgent):
             console.print(f"[red]✗ Invalid requirement: {reason}[/red]")
             raise InvalidRequirementError(reason)
 
-        # Step 4: Check LLM-level completeness flag
+        # Step 4: Check LLM-level completeness flag.
+        # When codebase context is available, the code fills any gaps the requirement
+        # text doesn't cover — suppress IncompleteRequirementError in that case and
+        # let the LLM proceed with the analysis it has already produced.
         if not result.get("is_complete", True):
-            issues = result.get("completeness_issues", ["Requirement lacks sufficient detail."])
-            missing = result.get("missing_information", [])
-            suggestion = result.get("suggestion", "")
-            console.print(f"[yellow]✗ Incomplete requirement — {len(issues)} issue(s) found[/yellow]")
-            for issue in issues:
-                console.print(f"  [yellow]• {issue}[/yellow]")
-            raise IncompleteRequirementError(issues, missing, suggestion)
+            if has_codebase:
+                console.print(
+                    "[cyan]ℹ Requirement appears incomplete in isolation, but codebase context "
+                    "is available — proceeding with analysis.[/cyan]"
+                )
+            else:
+                issues = result.get("completeness_issues", ["Requirement lacks sufficient detail."])
+                missing = result.get("missing_information", [])
+                suggestion = result.get("suggestion", "")
+                console.print(f"[yellow]✗ Incomplete requirement — {len(issues)} issue(s) found[/yellow]")
+                for issue in issues:
+                    console.print(f"  [yellow]• {issue}[/yellow]")
+                raise IncompleteRequirementError(issues, missing, suggestion)
 
-        # Step 5: Parse into PlannerAnalysis (drop the extra validation fields the LLM added)
+        # Step 5: Check codebase relevance — expose result so the pipeline can act on it
+        self.codebase_relevant: bool = result.pop("codebase_relevant", True)
+        mismatch_reason: str = result.pop("mismatch_reason", "")
+        if has_codebase and not self.codebase_relevant:
+            console.print(
+                f"[yellow]⚠ GitHub link and requirement are mismatched"
+                + (f": {mismatch_reason}" if mismatch_reason else "")
+                + "[/yellow]"
+            )
+            console.print(
+                "[yellow]  Generating test cases based on given requirement input.[/yellow]"
+            )
+
+        # Step 6: Parse into PlannerAnalysis (drop the extra validation fields the LLM added)
         result.pop("is_valid", None)
         result.pop("is_complete", None)
         result.pop("validation_error", None)
@@ -199,25 +230,34 @@ class PlannerAgent(BaseAgent):
 
         console.print(f"[green]✓ Input validation passed[/green] ({len(text)} chars)")
     
-    def _build_user_message(self, requirement: RequirementInput) -> str:
+    def _build_user_message(self, requirement: RequirementInput, has_codebase: bool = False) -> str:
         """Build the user message from requirement input."""
         parts = [
             f"## REQUIREMENT INPUT",
             f"**Type:** {requirement.input_type.value}",
             f"**Content:**\n{requirement.content}"
         ]
-        
+
         if requirement.project_context:
             parts.append(f"\n**Project Context:** {requirement.project_context}")
-        
+
         if requirement.tech_stack:
             parts.append(f"\n**Tech Stack:** {requirement.tech_stack}")
-        
+
         if requirement.additional_context:
             parts.append(f"\n**Additional Context:** {requirement.additional_context}")
-        
+
+        if has_codebase:
+            parts.append(
+                "\n\n**NOTE:** Codebase context (routes, models, UI components) is provided "
+                "in the context section below. Use it to infer any implementation details that "
+                "are not explicit in the requirement text (endpoints, parameters, data shapes, "
+                "UI elements). Do NOT return is_complete=false just because the requirement "
+                "text alone is vague — the codebase resolves those gaps."
+            )
+
         parts.append("\n\nAnalyze this requirement and provide your structured analysis.")
-        
+
         return "\n".join(parts)
     
     def _log_analysis(self, analysis: PlannerAnalysis) -> None:

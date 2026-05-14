@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # OpenAI API
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API Key")
     model_name: str = Field(default="gpt-4o", description="Model to use")
-    max_tokens: int = Field(default=16000, description="Max tokens for responses")
+    max_tokens: int = Field(default=4096, description="Max tokens for responses")
 
     # Anthropic API (optional, used when llm_provider=anthropic)
     anthropic_api_key: Optional[str] = Field(default=None, description="Anthropic API Key")
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     jira_api_token: Optional[str] = Field(default=None, description="Jira API token")
     
     # API Configuration
-    api_host: str = Field(default="192.168.0.86", description="API host")
+    api_host: str = Field(default="0.0.0.0", description="API host")
     api_port: int = Field(default=8000, description="API port")
     debug: bool = Field(default=False, description="Debug mode")
     

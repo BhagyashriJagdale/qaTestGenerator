@@ -91,8 +91,21 @@ class TestGeneratorPipeline:
         if self.use_rag and self.rag:
             rag_context = self._get_initial_rag_context(requirement)
         
-        analysis = self.planner.run(requirement, rag_context=rag_context)
-        
+        analysis = self.planner.run(
+            requirement,
+            rag_context=rag_context,
+            tool_context=tool_context,
+        )
+
+        # If the codebase doesn't match the requirement, drop it — the generator
+        # would otherwise ground tests in the wrong codebase.
+        if tool_context and not getattr(self.planner, "codebase_relevant", True):
+            console.print(
+                "[yellow]⚠ GitHub link and requirement are mismatched — "
+                "generating test cases and automation scripts based on requirement input only.[/yellow]"
+            )
+            tool_context = None
+
         # Step 2: Get enhanced RAG context based on analysis
         if self.use_rag and self.rag:
             rag_context = self.rag.get_context_for_generation(
@@ -100,7 +113,7 @@ class TestGeneratorPipeline:
                 domain=analysis.domain,
                 intent=analysis.intent
             )
-        
+
         # Step 3: Generator Agent
         manual_tests, api_tests, ui_tests = self.generator.run(
             requirement=requirement,

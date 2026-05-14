@@ -43,14 +43,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import logging
+
 # In-memory job storage — jobs are lost on server restart.
 # For production, replace with Redis or a database-backed store.
-import logging
-logging.getLogger(__name__).warning(
-    "Using in-memory job store. All jobs will be lost on server restart. "
-    "Set up Redis or a persistent store for production."
-)
 jobs: dict[str, dict] = {}
+
+
+@app.on_event("startup")
+async def _warn_in_memory_store():
+    logging.getLogger(__name__).warning(
+        "Using in-memory job store. All jobs will be lost on server restart. "
+        "Set up Redis or a persistent store for production."
+    )
 
 
 # ============================================
@@ -186,7 +191,7 @@ async def generate_test_cases(request: GenerateRequest):
 
         # Run pipeline in a thread so the async event loop is not blocked
         pipeline = TestGeneratorPipeline(use_rag=request.use_rag)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, pipeline.run, requirement, config)
 
         total = (
@@ -358,7 +363,7 @@ async def _run_generation_job(job_id: str, request: GenerateRequest):
 
         # Run pipeline in a thread — each LLM call is blocking I/O
         pipeline = TestGeneratorPipeline(use_rag=request.use_rag)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         _progress(20)  # planning
         result = await loop.run_in_executor(None, pipeline.run, requirement, config)

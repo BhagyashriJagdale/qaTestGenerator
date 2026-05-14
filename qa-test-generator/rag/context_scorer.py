@@ -45,6 +45,7 @@ def _build_block(
             available = max(200, char_budget - used - len(meta) - 2)
             snippet = content[:available]
             suffix = "..." if len(content) > available else ""
+            entry = f"\n{meta}\n{snippet}{suffix}"
         else:
             snippet = content[:400]
             suffix = "..." if len(content) > 400 else ""
@@ -52,7 +53,6 @@ def _build_block(
             if used + len(entry) > char_budget:
                 break
 
-        entry = f"\n{meta}\n{snippet}{suffix}"  # built once; for i>0 this reuses the already-checked values
         lines.append(entry)
         used += len(entry)
 
