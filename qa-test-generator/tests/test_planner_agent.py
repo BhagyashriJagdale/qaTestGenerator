@@ -119,9 +119,55 @@ def test_run_propagates_llm_exception(planner):
 def test_run_passes_rag_context_to_llm(planner):
     planner.client.generate_json = MagicMock(return_value=_VALID_LLM_RESPONSE.copy())
     planner.run(_req(_VALID_REQ), rag_context="## Prior context: login pattern")
-    # Verify generate_json was called (with some message containing rag_context)
     call_args = planner.client.generate_json.call_args
     assert "Prior context" in call_args[1]["user_message"] or "Prior context" in str(call_args)
+
+
+# ── run() — with tool_context (codebase) ─────────────────────────────────────
+
+def test_run_suppresses_incomplete_when_codebase_present(planner):
+    from agents.planner_agent import IncompleteRequirementError
+    # LLM says incomplete, but codebase context is provided — should NOT raise
+    planner.client.generate_json = MagicMock(return_value={
+        **_VALID_LLM_RESPONSE,
+        "is_complete": False,
+        "completeness_issues": ["No endpoint specified"],
+        "missing_information": ["Which API endpoint?"],
+    })
+    # Should not raise even though is_complete=False
+    result = planner.run(
+        _req("Admin checks flight status"),
+        tool_context="## routes/flights.ts\nexport const getFlightStatus = ...",
+    )
+    assert result.feature_name == "User Login"
+
+
+def test_run_raises_incomplete_without_codebase(planner):
+    from agents.planner_agent import IncompleteRequirementError
+    planner.client.generate_json = MagicMock(return_value={
+        **_VALID_LLM_RESPONSE,
+        "is_complete": False,
+        "completeness_issues": ["Too vague"],
+        "missing_information": ["What endpoint?"],
+    })
+    with pytest.raises(IncompleteRequirementError):
+        planner.run(_req(_VALID_REQ))  # no tool_context — should still raise
+
+
+def test_run_passes_tool_context_to_llm(planner):
+    planner.client.generate_json = MagicMock(return_value=_VALID_LLM_RESPONSE.copy())
+    planner.run(_req(_VALID_REQ), tool_context="## src/routes/auth.ts\nrouter.post('/login')")
+    call_args = planner.client.generate_json.call_args
+    full_msg = call_args[1]["user_message"]
+    assert "auth.ts" in full_msg
+
+
+def test_run_includes_codebase_note_in_message(planner):
+    planner.client.generate_json = MagicMock(return_value=_VALID_LLM_RESPONSE.copy())
+    planner.run(_req(_VALID_REQ), tool_context="## routes/flights.ts\n...")
+    call_args = planner.client.generate_json.call_args
+    full_msg = call_args[1]["user_message"]
+    assert "codebase" in full_msg.lower() or "is_complete=false" in full_msg
 
 
 # ── IncompleteRequirementError message ────────────────────────────────────────

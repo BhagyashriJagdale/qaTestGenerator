@@ -91,7 +91,11 @@ class TestGeneratorPipeline:
         if self.use_rag and self.rag:
             rag_context = self._get_initial_rag_context(requirement)
         
-        analysis = self.planner.run(requirement, rag_context=rag_context)
+        analysis = self.planner.run(
+            requirement,
+            rag_context=rag_context,
+            tool_context=tool_context,
+        )
         
         # Step 2: Get enhanced RAG context based on analysis
         if self.use_rag and self.rag:
