@@ -4,12 +4,15 @@ Provider is selected via the LLM_PROVIDER environment variable.
 """
 
 import json
+import logging
 import threading
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
 from config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class BaseLLMClient(ABC):
@@ -43,22 +46,31 @@ class BaseLLMClient(ABC):
     ) -> str: ...
 
 
+_RETRY_KWARGS = dict(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True,
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+)
+
+
 class OpenAIClient(BaseLLMClient):
     """OpenAI (or compatible) LLM client."""
 
     def __init__(self):
         import openai
-        import os
         settings = get_settings()
-        base_url = os.environ.get("OPENAI_BASE_URL", None)
+        base_url = settings.openai_base_url
         self.client = openai.OpenAI(
             api_key=settings.openai_api_key,
-            base_url=base_url
+            base_url=base_url or None,
         )
         self.model = settings.model_name
         self.max_tokens = settings.max_tokens
+        # response_format=json_object is OpenAI-only; skip for third-party compatible APIs
+        self._use_json_mode = base_url is None
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(**_RETRY_KWARGS)
     def generate(self, system_prompt, user_message, temperature=0.7, max_tokens=None) -> str:
         response = self.client.chat.completions.create(
             model=self.model,
@@ -71,25 +83,27 @@ class OpenAIClient(BaseLLMClient):
         )
         return response.choices[0].message.content
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(**_RETRY_KWARGS)
     def generate_json(self, system_prompt, user_message, temperature=0.3, max_tokens=None) -> dict:
         json_system_prompt = (
             f"{system_prompt}\n\n"
             "IMPORTANT: You must respond with valid JSON only. No markdown, no explanation, just the JSON object."
         )
-        response = self.client.chat.completions.create(
+        kwargs: dict = dict(
             model=self.model,
             max_tokens=max_tokens or self.max_tokens,
             temperature=temperature,
-            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": json_system_prompt},
                 {"role": "user", "content": user_message},
             ],
         )
+        if self._use_json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = self.client.chat.completions.create(**kwargs)
         return _parse_json_safe(response.choices[0].message.content)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(**_RETRY_KWARGS)
     def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
         all_messages = [{"role": "system", "content": system_prompt}] + messages
         response = self.client.chat.completions.create(
@@ -111,7 +125,7 @@ class ClaudeClient(BaseLLMClient):
         self.model = settings.model_name
         self.max_tokens = settings.max_tokens
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(**_RETRY_KWARGS)
     def generate(self, system_prompt, user_message, temperature=0.7, max_tokens=None) -> str:
         response = self.client.messages.create(
             model=self.model,
@@ -122,7 +136,7 @@ class ClaudeClient(BaseLLMClient):
         )
         return response.content[0].text
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(**_RETRY_KWARGS)
     def generate_json(self, system_prompt, user_message, temperature=0.3, max_tokens=None) -> dict:
         json_system_prompt = (
             f"{system_prompt}\n\n"
@@ -137,7 +151,7 @@ class ClaudeClient(BaseLLMClient):
         )
         return _parse_json_safe(response.content[0].text)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(**_RETRY_KWARGS)
     def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
         response = self.client.messages.create(
             model=self.model,
@@ -147,6 +161,14 @@ class ClaudeClient(BaseLLMClient):
             temperature=temperature,
         )
         return response.content[0].text
+
+
+_RETRY_KWARGS_DEEPSEEK = dict(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=2, max=6),
+    reraise=True,
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+)
 
 
 class DeepSeekClient(BaseLLMClient):
@@ -164,7 +186,7 @@ class DeepSeekClient(BaseLLMClient):
         self.model = settings.model_name
         self.max_tokens = settings.max_tokens
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(**_RETRY_KWARGS_DEEPSEEK)
     def generate(self, system_prompt, user_message, temperature=0.7, max_tokens=None) -> str:
         response = self.client.chat.completions.create(
             model=self.model,
@@ -177,7 +199,7 @@ class DeepSeekClient(BaseLLMClient):
         )
         return response.choices[0].message.content
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=6))
+    @retry(**_RETRY_KWARGS_DEEPSEEK)
     def generate_json(self, system_prompt, user_message, temperature=0.3, max_tokens=None) -> dict:
         json_system_prompt = (
             f"{system_prompt}\n\n"
@@ -195,7 +217,7 @@ class DeepSeekClient(BaseLLMClient):
         )
         return _parse_json_safe(response.choices[0].message.content)
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=6))
+    @retry(**_RETRY_KWARGS_DEEPSEEK)
     def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
         all_messages = [{"role": "system", "content": system_prompt}] + messages
         response = self.client.chat.completions.create(

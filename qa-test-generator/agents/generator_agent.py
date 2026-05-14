@@ -6,6 +6,7 @@ passing the manual tests as context so automation scripts align with manual scen
 """
 
 import concurrent.futures
+import traceback
 from typing import Optional
 from .base_agent import BaseAgent
 from .prompts import GENERATOR_SYSTEM_PROMPT
@@ -148,8 +149,9 @@ Rules:
             tests = self._parse_manual_tests(result.get("manual_test_cases", []))
             return self._normalize_ids(tests, "MTC"), None
         except Exception as e:
-            console.print(f"[red]Manual generation failed: {e}[/red]")
-            return [], str(e)
+            console.print(f"[red]Manual generation failed: {type(e).__name__}: {e}[/red]")
+            console.print(f"[dim]{traceback.format_exc()}[/dim]")
+            return [], f"{type(e).__name__}: {e}"
 
     def _generate_api(
         self, base: str, manual_context: str = ""
@@ -203,8 +205,9 @@ Rules:
             )
             return self._normalize_ids(tests, "ATC"), None
         except Exception as e:
-            console.print(f"[red]API generation failed: {e}[/red]")
-            return [], str(e)
+            console.print(f"[red]API generation failed: {type(e).__name__}: {e}[/red]")
+            console.print(f"[dim]{traceback.format_exc()}[/dim]")
+            return [], f"{type(e).__name__}: {e}"
 
     def _generate_ui(
         self, base: str, manual_context: str = ""
@@ -258,8 +261,9 @@ Rules:
             )
             return self._normalize_ids(tests, "UTC"), None
         except Exception as e:
-            console.print(f"[red]UI generation failed: {e}[/red]")
-            return [], str(e)
+            console.print(f"[red]UI generation failed: {type(e).__name__}: {e}[/red]")
+            console.print(f"[dim]{traceback.format_exc()}[/dim]")
+            return [], f"{type(e).__name__}: {e}"
 
     # ------------------------------------------------------------------
     # Message builders
