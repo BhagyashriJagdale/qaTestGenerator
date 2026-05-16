@@ -4,7 +4,7 @@ Provides REST API endpoints for test case generation.
 """
 
 import ipaddress
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
@@ -193,7 +193,7 @@ async def health_check():
 @app.post("/generate", response_model=GenerateResponse)
 async def generate_test_cases(
     request: GenerateRequest,
-    authorization: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
 ):
     """
     Generate test cases from a requirement.
@@ -358,7 +358,7 @@ async def generate_test_cases(
 async def generate_test_cases_async(
     request: GenerateRequest,
     background_tasks: BackgroundTasks,
-    authorization: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
 ):
     """
     Generate test cases asynchronously.

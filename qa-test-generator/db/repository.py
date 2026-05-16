@@ -46,7 +46,7 @@ def get_project(project_id: str, user_id: str) -> Optional[dict]:
         .select("*")
         .eq("id", project_id)
         .eq("user_id", user_id)
-        .single()
+        .maybe_single()
         .execute()
     )
     return result.data
@@ -161,7 +161,7 @@ def get_test_suite(suite_id: str, user_id: str) -> Optional[dict]:
         .select("*")
         .eq("id", suite_id)
         .eq("user_id", user_id)
-        .single()
+        .maybe_single()
         .execute()
     )
     return result.data
