@@ -3,12 +3,14 @@ FastAPI server for the QA Test Case Generator.
 Provides REST API endpoints for test case generation.
 """
 
+import ipaddress
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import datetime
+from urllib.parse import urlparse
 import asyncio
 import uuid
 
@@ -22,6 +24,7 @@ from core.models import (
 from pipeline import TestGeneratorPipeline, RequirementInput
 from rag import get_rag_system
 from agents.planner_agent import InvalidRequirementError, IncompleteRequirementError
+from tools.website_crawler import WebsiteContextFetcher
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -72,6 +75,14 @@ class GenerateRequest(BaseModel):
         default=None,
         description="GitHub repository URL — the pipeline fetches routes, models, and components to ground test cases in the actual codebase"
     )
+    website_url: Optional[str] = Field(
+        default=None,
+        description="Hosted website URL — crawled for exact Playwright locators and API endpoint URLs to ground UI/API test generation"
+    )
+    additional_context: Optional[str] = Field(
+        default=None,
+        description="Any extra context to pass to the planner (domain rules, constraints, notes)"
+    )
     include_manual: bool = Field(default=True, description="Generate manual tests")
     include_api: bool = Field(default=True, description="Generate API tests")
     include_ui: bool = Field(default=True, description="Generate UI tests")
@@ -80,6 +91,30 @@ class GenerateRequest(BaseModel):
         description="Scenario types to cover"
     )
     use_rag: bool = Field(default=True, description="Use RAG for context")
+    crawler_timeout: int = Field(default=15, description="HTTP timeout in seconds for website crawl")
+
+    @field_validator("website_url")
+    @classmethod
+    def validate_website_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("website_url must start with http:// or https://")
+        # C-1: SSRF guard — reject obvious private/loopback targets
+        host = (urlparse(v).hostname or "").lower()
+        if host in ("localhost", "localhost.localdomain"):
+            raise ValueError(f"website_url must point to a public host, not '{host}'")
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+                raise ValueError(
+                    f"website_url points to a non-public IP address '{host}'"
+                )
+        except ValueError as exc:
+            if "non-public" in str(exc) or "public host" in str(exc):
+                raise
+            # host is a domain name, not an IP literal — DNS not resolved here
+        return v
 
 
 class GenerateResponse(BaseModel):
@@ -178,7 +213,9 @@ async def generate_test_cases(request: GenerateRequest):
             input_type=input_type,
             project_context=request.project_context,
             tech_stack=request.tech_stack,
+            additional_context=request.additional_context or None,
             github_repo_url=request.github_repo_url or None,
+            website_url=request.website_url or None,
         )
 
         # Create config
@@ -190,7 +227,11 @@ async def generate_test_cases(request: GenerateRequest):
         )
 
         # Run pipeline in a thread so the async event loop is not blocked
-        pipeline = TestGeneratorPipeline(use_rag=request.use_rag)
+        website_fetcher = (
+            WebsiteContextFetcher(timeout=request.crawler_timeout)
+            if request.website_url else None
+        )
+        pipeline = TestGeneratorPipeline(use_rag=request.use_rag, website_fetcher=website_fetcher)
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, pipeline.run, requirement, config)
 
@@ -347,7 +388,9 @@ async def _run_generation_job(job_id: str, request: GenerateRequest):
             input_type=input_type,
             project_context=request.project_context,
             tech_stack=request.tech_stack,
+            additional_context=request.additional_context or None,
             github_repo_url=request.github_repo_url or None,
+            website_url=request.website_url or None,
         )
         config = GenerationConfig(
             include_manual=request.include_manual,
@@ -362,7 +405,11 @@ async def _run_generation_job(job_id: str, request: GenerateRequest):
             jobs[job_id]["progress"] = pct
 
         # Run pipeline in a thread — each LLM call is blocking I/O
-        pipeline = TestGeneratorPipeline(use_rag=request.use_rag)
+        website_fetcher = (
+            WebsiteContextFetcher(timeout=request.crawler_timeout)
+            if request.website_url else None
+        )
+        pipeline = TestGeneratorPipeline(use_rag=request.use_rag, website_fetcher=website_fetcher)
         loop = asyncio.get_running_loop()
 
         _progress(20)  # planning

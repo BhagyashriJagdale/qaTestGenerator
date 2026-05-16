@@ -18,6 +18,7 @@ from core.models import (
     AutomationTestCase,
     TestCaseType,
 )
+from tools.website_crawler import WebsiteContext
 from rich.console import Console
 
 console = Console()
@@ -45,6 +46,7 @@ class GeneratorAgent(BaseAgent):
         config: GenerationConfig,
         rag_context: Optional[str] = None,
         tool_context: Optional[str] = None,
+        website_context: Optional[WebsiteContext] = None,
         existing_manual_tests: Optional[list[ManualTestCase]] = None,
     ) -> tuple[list[ManualTestCase], list[AutomationTestCase], list[AutomationTestCase]]:
         """
@@ -52,6 +54,10 @@ class GeneratorAgent(BaseAgent):
         manual test cases as context so automation aligns with manual scenarios.
 
         Args:
+            tool_context: GitHub/codebase context (grounding for code structure).
+            website_context: Structured WebsiteContext from the crawler. Injected
+                             directly into task prompts as mandatory locator/endpoint
+                             data so the LLM uses exact selectors from the real app.
             existing_manual_tests: Already-generated manual tests to use as context
                                    when regenerating only API/UI (refinement passes).
 
@@ -89,10 +95,10 @@ class GeneratorAgent(BaseAgent):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             if config.include_api:
                 console.print("[cyan]  → Generating API automation scripts (based on manual tests)...[/cyan]")
-                enabled["api"] = pool.submit(self._generate_api, full_base, manual_context)
+                enabled["api"] = pool.submit(self._generate_api, full_base, manual_context, website_context)
             if config.include_ui:
                 console.print("[cyan]  → Generating UI automation scripts (based on manual tests)...[/cyan]")
-                enabled["ui"] = pool.submit(self._generate_ui, full_base, manual_context)
+                enabled["ui"] = pool.submit(self._generate_ui, full_base, manual_context, website_context)
             concurrent.futures.wait(enabled.values())
 
         if "api" in enabled:
@@ -154,18 +160,22 @@ Rules:
             return [], f"{type(e).__name__}: {e}"
 
     def _generate_api(
-        self, base: str, manual_context: str = ""
+        self, base: str, manual_context: str = "", website_context: Optional[WebsiteContext] = None
     ) -> tuple[list[AutomationTestCase], Optional[str]]:
-        if manual_context:
-            manual_section = (
-                f"\n\n## MANUAL TEST CASES TO AUTOMATE\n"
-                f"Your API tests MUST cover the same scenarios as these manual test cases.\n"
-                f"Use the same test data, scenario types, and expected outcomes — translated to HTTP status codes and response body assertions.\n"
-                f"{manual_context}"
-            )
-        else:
-            manual_section = ""
-        message = base + manual_section + """
+        manual_section = (
+            f"\n\n## MANUAL TEST CASES TO AUTOMATE\n"
+            f"Your API tests MUST cover the same scenarios as these manual test cases.\n"
+            f"Use the same test data, scenario types, and expected outcomes — translated to HTTP status codes and response body assertions.\n"
+            f"{manual_context}"
+        ) if manual_context else ""
+
+        website_section = (
+            self._build_website_instruction(website_context, mode="api")
+            if website_context and not website_context.is_empty()
+            else ""
+        )
+
+        message = base + manual_section + website_section + """
 
 ## YOUR TASK — API AUTOMATION SCRIPTS ONLY
 Generate ONLY Playwright TypeScript API automation tests. Return a JSON object with this exact shape:
@@ -210,18 +220,22 @@ Rules:
             return [], f"{type(e).__name__}: {e}"
 
     def _generate_ui(
-        self, base: str, manual_context: str = ""
+        self, base: str, manual_context: str = "", website_context: Optional[WebsiteContext] = None
     ) -> tuple[list[AutomationTestCase], Optional[str]]:
-        if manual_context:
-            manual_section = (
-                f"\n\n## MANUAL TEST CASES TO AUTOMATE\n"
-                f"Your UI tests MUST cover the same scenarios as these manual test cases.\n"
-                f"Use the same test data, action sequences, and expected outcomes — translated to Playwright page interactions and assertions.\n"
-                f"{manual_context}"
-            )
-        else:
-            manual_section = ""
-        message = base + manual_section + """
+        manual_section = (
+            f"\n\n## MANUAL TEST CASES TO AUTOMATE\n"
+            f"Your UI tests MUST cover the same scenarios as these manual test cases.\n"
+            f"Use the same test data, action sequences, and expected outcomes — translated to Playwright page interactions and assertions.\n"
+            f"{manual_context}"
+        ) if manual_context else ""
+
+        website_section = (
+            self._build_website_instruction(website_context, mode="ui")
+            if website_context and not website_context.is_empty()
+            else ""
+        )
+
+        message = base + manual_section + website_section + """
 
 ## YOUR TASK — UI AUTOMATION SCRIPTS ONLY
 Generate ONLY Playwright TypeScript UI automation tests. Return a JSON object with this exact shape:
@@ -266,6 +280,83 @@ Rules:
             return [], f"{type(e).__name__}: {e}"
 
     # ------------------------------------------------------------------
+    # Website context injection (DESIGN-1: uses structured data directly)
+    # ------------------------------------------------------------------
+
+    def _build_website_instruction(self, website_context: WebsiteContext, mode: str) -> str:
+        """
+        Build an explicit mandatory instruction block from a WebsiteContext object.
+        Injected directly into the task prompt — no regex re-parsing needed.
+
+        mode="ui"  → page URL + locators for Playwright page interactions
+        mode="api" → API endpoints and form actions for request URLs
+        """
+        lines = [
+            "\n\n## ⚠ LIVE WEBSITE DATA — MANDATORY (from automated crawl)",
+            "The values below were extracted from the actual running application.",
+            "You MUST use ONLY these values. Do not guess, invent, or substitute any locators or URLs.",
+        ]
+
+        if mode == "ui":
+            if website_context.url:
+                lines.append(f"\n**PAGE URL** — use in every `page.goto()` call:")
+                lines.append(f"  {website_context.url}")
+
+            if website_context.locators:
+                lines.append(
+                    "\n**LOCATORS** — use these EXACT strings in every "
+                    "`page.locator()`, `page.fill()`, `page.click()` call:"
+                )
+                for loc in website_context.locators:
+                    lines.append(f"  - `{loc}`")
+            else:
+                # PROMPT-3: no form fields found — guide the LLM away from form scenarios
+                lines.append(
+                    "\n⚠ No interactive form elements were found on this page. "
+                    "Skip form-related negative scenarios (empty field, invalid format input). "
+                    "Focus instead on: navigation, page-load states, network errors, and auth/session scenarios."
+                )
+
+            if website_context.api_urls or website_context.form_actions:
+                lines.append("\n**API PATHS** — use these in `page.route()` mock patterns:")
+                for url in dict.fromkeys(website_context.form_actions + website_context.api_urls):
+                    lines.append(f"  - `{url}`")
+
+            if website_context.locators:
+                lines.append(
+                    "\nCRITICAL: Every selector in your generated code must appear in the LOCATORS list above. "
+                    "If a UI element is not listed, do NOT write a test for it."
+                )
+
+        else:  # api
+            all_endpoints = list(dict.fromkeys(website_context.form_actions + website_context.api_urls))
+
+            if website_context.url:
+                lines.append(f"\n**BASE URL** — extract origin for `baseURL` config:")
+                lines.append(f"  {website_context.url}")
+
+            if all_endpoints:
+                lines.append("\n**API ENDPOINTS** — use these EXACT paths for every request URL:")
+                for ep in all_endpoints:
+                    lines.append(f"  - `{ep}`")
+                # PROMPT-2: explicit guidance for page.route() patterns
+                lines.append(
+                    "\nFor `page.route()` interception, use `**<path>` glob patterns "
+                    "(e.g. `**/<endpoint-path>`) matching paths from the list above."
+                )
+            else:
+                lines.append(
+                    "\n(No API endpoints were extracted from the page — infer from requirement context.)"
+                )
+
+            lines.append(
+                "\nCRITICAL: Every `request.post()`, `request.get()` etc. must use a path from the list above. "
+                "Do not invent endpoint paths."
+            )
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
     # Message builders
     # ------------------------------------------------------------------
 
@@ -289,7 +380,12 @@ Rules:
                     f" → {step.expected_result}"
                 )
             entry = "\n".join(block)
-            if chars > 0 and chars + len(entry) > max_chars:
+            # BUG-4 fix: check budget BEFORE appending, even for the first entry.
+            # Truncate the first entry rather than blindly including it if it is huge.
+            if chars + len(entry) > max_chars:
+                if chars == 0:
+                    # Always include at least a truncated version of the first entry
+                    lines.append(entry[:max_chars])
                 break
             lines.append(entry)
             chars += len(entry)
