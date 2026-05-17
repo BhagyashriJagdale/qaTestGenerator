@@ -4,7 +4,7 @@ Provides REST API endpoints for test case generation.
 """
 
 import ipaddress
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
@@ -26,6 +26,7 @@ from rag import get_rag_system
 from agents.planner_agent import InvalidRequirementError, IncompleteRequirementError
 from tools.website_crawler import WebsiteContextFetcher
 from api.auth import get_current_user
+from db.client import get_supabase_client
 import db.repository as repo
 
 # Initialize FastAPI app
@@ -164,6 +165,23 @@ class AddKnowledgeRequest(BaseModel):
     knowledge_type: str = Field(default="best_practice")
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+
+
+class AuthTokenResponse(BaseModel):
+    access_token: Optional[str] = None
+    token_type: str = "bearer"
+    email_confirmation_required: bool = False
+
+
 # ============================================
 # ENDPOINTS
 # ============================================
@@ -190,24 +208,48 @@ async def health_check():
     )
 
 
+@app.post("/auth/login", response_model=AuthTokenResponse)
+async def login(request: LoginRequest):
+    """Authenticate with email + password; returns a short-lived Supabase JWT."""
+    try:
+        client = get_supabase_client()
+        response = client.auth.sign_in_with_password({"email": request.email, "password": request.password})
+        if not response.session:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        return AuthTokenResponse(access_token=response.session.access_token)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+
+@app.post("/auth/signup", response_model=AuthTokenResponse)
+async def signup(request: SignupRequest):
+    """Register a new user; returns a JWT or signals that email confirmation is needed."""
+    try:
+        client = get_supabase_client()
+        response = client.auth.sign_up({"email": request.email, "password": request.password})
+        if response.session:
+            return AuthTokenResponse(access_token=response.session.access_token)
+        return AuthTokenResponse(email_confirmation_required=True)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/generate", response_model=GenerateResponse)
 async def generate_test_cases(
     request: GenerateRequest,
-    authorization: Optional[str] = Header(None),
+    user_id: str = Depends(get_current_user),
 ):
     """
-    Generate test cases from a requirement.
-    Pass Authorization: Bearer <token> + project_id to persist results to the project.
+    Generate test cases from a requirement. Requires a valid Bearer token.
+    Pass project_id to persist results to the project.
     """
+    requirement_id: Optional[str] = None
+    log_id: Optional[str] = None
     try:
-        # Resolve authenticated user when an auth header is provided
-        user_id: Optional[str] = None
-        if authorization and request.project_id:
-            try:
-                user_id = await get_current_user(authorization)
-            except HTTPException:
-                pass  # auth failure is non-fatal for generation; project save will be skipped
-
         # Parse input type
         try:
             input_type = InputType(request.input_type)
@@ -224,12 +266,10 @@ async def generate_test_cases(
         if not scenarios:
             scenarios = [ScenarioType.HAPPY_PATH, ScenarioType.NEGATIVE, ScenarioType.EDGE_CASE]
 
-        # Save requirement to project if project_id + auth provided
-        requirement_id: Optional[str] = None
-        log_id: Optional[str] = None
+        # Save requirement to project if project_id provided
         job_id = str(uuid.uuid4())
 
-        if request.project_id and user_id:
+        if request.project_id:
             try:
                 req_record = repo.save_requirement(
                     project_id=request.project_id,
@@ -286,7 +326,7 @@ async def generate_test_cases(
         final_score = result.review.final_score if result.review else 0.0
 
         # Persist test suite and close execution log
-        if request.project_id and user_id:
+        if request.project_id:
             try:
                 suite_record = repo.save_test_suite(
                     project_id=request.project_id,
@@ -358,21 +398,13 @@ async def generate_test_cases(
 async def generate_test_cases_async(
     request: GenerateRequest,
     background_tasks: BackgroundTasks,
-    authorization: Optional[str] = Header(None),
+    user_id: str = Depends(get_current_user),
 ):
     """
-    Generate test cases asynchronously.
+    Generate test cases asynchronously. Requires a valid Bearer token.
     Returns a job ID that can be polled for status.
-    Pass Authorization: Bearer <token> + project_id to persist results to the project.
+    Pass project_id to persist results to the project.
     """
-    # Resolve user for project persistence (non-fatal if missing/invalid)
-    user_id: Optional[str] = None
-    if authorization and request.project_id:
-        try:
-            user_id = await get_current_user(authorization)
-        except HTTPException:
-            pass
-
     job_id = str(uuid.uuid4())
 
     jobs[job_id] = {
