@@ -321,14 +321,92 @@ class TransformersClient(BaseLLMClient):
         return self._chat(system_prompt, messages, temperature, max_tokens or self.max_tokens)
 
 
+def _repair_truncated_json(candidate: str) -> dict | None:
+    """
+    Salvage a truncated JSON array response by dropping the incomplete trailing
+    element and closing the still-open containers.
+
+    Walks the text once tracking string / brace depth and records the position
+    after every complete array-element close (depth-1 object, inside the root
+    array).  Truncates there, strips any trailing comma, and appends the minimum
+    closing suffix needed to produce valid JSON.
+
+    Returns a parsed dict, or None if no complete element was found.
+    """
+    stack: list[str] = []
+    in_string = False
+    escape_next = False
+    safe_end: int = -1  # exclusive index after the last complete array element
+
+    for i, c in enumerate(candidate):
+        if escape_next:
+            escape_next = False
+            continue
+        if in_string:
+            if c == '\\':
+                escape_next = True
+            elif c == '"':
+                in_string = False
+        else:
+            if c == '"':
+                in_string = True
+            elif c in ('{', '['):
+                stack.append(c)
+            elif c == '}':
+                if stack and stack[-1] == '{':
+                    stack.pop()
+                    if stack and stack[-1] == '[':
+                        safe_end = i + 1   # closed an object directly inside an array
+                    elif not stack:
+                        safe_end = i + 1   # closed the root object itself
+            elif c == ']':
+                if stack and stack[-1] == '[':
+                    stack.pop()
+
+    if not stack:
+        return None  # already balanced; caller should just json.loads()
+
+    if safe_end < 0:
+        return None  # no complete element found; nothing to recover
+
+    truncated = candidate[:safe_end].rstrip().rstrip(',')
+
+    # Recompute the open-container stack at safe_end to build the closing suffix
+    closing: list[str] = []
+    in_str = False
+    esc = False
+    for c in truncated:
+        if esc:
+            esc = False
+            continue
+        if in_str:
+            if c == '\\': esc = True
+            elif c == '"': in_str = False
+        else:
+            if c == '"': in_str = True
+            elif c in ('{', '['): closing.append(c)
+            elif c == '}' and closing and closing[-1] == '{': closing.pop()
+            elif c == ']' and closing and closing[-1] == '[': closing.pop()
+
+    suffix = ''.join('}' if o == '{' else ']' for o in reversed(closing))
+    try:
+        return json.loads(truncated + suffix)
+    except json.JSONDecodeError:
+        return None
+
+
 def _parse_json_safe(text: str) -> dict:
     """
     Parse JSON from an LLM response, recovering from common issues:
     - Markdown fences (```json ... ```)
-    - Truncated output (unterminated strings/arrays) — salvages whatever keys are complete
+    - Truncated output (unterminated strings/arrays) — salvages whatever elements are complete
 
-    Recovery strategy is O(n) scan + at most 20 parse attempts, avoiding the O(n²)
-    cost of trying every possible end position.
+    Recovery strategy:
+    1. Strip markdown fences, direct parse.
+    2. _repair_truncated_json — drops the incomplete trailing array element and
+       closes open containers.  Handles models (e.g. Groq/Llama) that stop
+       mid-JSON with finish_reason="stop" instead of "length".
+    3. Scan for the last 20 closing-brace positions — O(n), ≤20 parse attempts.
     """
     text = text.strip()
     for fence in ("```json", "```"):
@@ -350,9 +428,17 @@ def _parse_json_safe(text: str) -> dict:
 
     candidate = text[start:]
 
-    # Scan once for closing brace positions — O(n) — then try the last 20 in reverse.
-    # This covers the common truncation case (cut off mid-string or mid-array) without
-    # the O(n²) cost of trying every character position.
+    # Try smart repair: drop incomplete trailing array element and close structure
+    repaired = _repair_truncated_json(candidate)
+    if repaired is not None:
+        logger.warning(
+            "Truncated JSON recovered: dropped incomplete trailing element. "
+            "Consider increasing MAX_TOKENS if results seem short."
+        )
+        return repaired
+
+    # Fallback: scan once for closing brace positions — O(n) — then try last 20 in reverse.
+    # Covers flat-object truncation where the array repair above doesn't apply.
     close_positions = [i for i, c in enumerate(candidate) if c == "}"]
     for pos in reversed(close_positions[-20:]):
         try:
