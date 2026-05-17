@@ -30,7 +30,7 @@ pyvenv.cfg
 qa-test-generator/data/chroma/
 
 # Generated test output
-tests/
+qa-test-generator/tests/
 
 # Archives
 *.zip
