@@ -189,16 +189,27 @@ class TestGeneratorPipeline:
             )
             analysis = self.planner.run(requirement, rag_context=gap_context, skip_validation=True)
 
-            # Only regenerate types that have actual gaps — skip types that are already sufficient
+            # Only regenerate types that have actual gaps — skip types that are already sufficient.
+            # "automation"/"counterpart" catch "has no automation counterpart" gaps reported by the
+            # review agent; without these the refinement silently skips API/UI regeneration.
             gap_text = " ".join(gaps + issues).lower()
             needs_manual = config.include_manual and any(
-                k in gap_text for k in ("manual", "step", "precondition", "coverage")
+                k in gap_text for k in (
+                    "manual", "step", "precondition", "coverage",
+                    "no test for", "missing test", "not covered",
+                )
             )
             needs_api = config.include_api and any(
-                k in gap_text for k in ("api", "endpoint", "request", "status", "response")
+                k in gap_text for k in (
+                    "api", "endpoint", "request", "status", "response",
+                    "automation", "counterpart",
+                )
             )
             needs_ui = config.include_ui and any(
-                k in gap_text for k in ("ui", "browser", "page", "element", "selector", "form")
+                k in gap_text for k in (
+                    "ui", "browser", "page", "element", "selector", "form",
+                    "automation", "counterpart",
+                )
             )
             # If gaps are generic (not type-specific), regenerate all enabled types
             if not needs_manual and not needs_api and not needs_ui:
@@ -390,8 +401,8 @@ class TestGeneratorPipeline:
         existing_ui: list | None = None,
     ) -> str:
         """Format review gaps/issues into a concise context string — cap to avoid prompt bloat."""
-        top_gaps = gaps[:3]
-        top_issues = issues[:3]
+        top_gaps = gaps[:5]
+        top_issues = issues[:5]
         lines = [f"### REFINEMENT PASS {iteration} — fill these specific gaps ONLY:"]
         if top_gaps:
             lines.append("Gaps: " + "; ".join(top_gaps))
