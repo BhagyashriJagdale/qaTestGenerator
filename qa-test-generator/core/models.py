@@ -3,10 +3,12 @@ Core data models for the QA Test Case Generator.
 Defines the structure for inputs, outputs, and internal data.
 """
 
-from pydantic import BaseModel, Field
+import ipaddress
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, Literal
 from enum import Enum
 from datetime import datetime
+from urllib.parse import urlparse
 
 
 # ============================================
@@ -57,6 +59,30 @@ class RequirementInput(BaseModel):
     tech_stack: Optional[str] = Field(default=None, description="Technology stack information")
     additional_context: Optional[str] = Field(default=None, description="Any additional context")
     github_repo_url: Optional[str] = Field(default=None, description="GitHub repository URL for codebase-grounded test generation")
+    website_url: Optional[str] = Field(default=None, description="Hosted website URL — crawled for exact Playwright locators and API endpoints")
+
+    @field_validator("website_url")
+    @classmethod
+    def validate_website_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("website_url must start with http:// or https://")
+        # C-1: SSRF guard — reject obvious private/loopback targets
+        host = (urlparse(v).hostname or "").lower()
+        if host in ("localhost", "localhost.localdomain"):
+            raise ValueError(f"website_url must point to a public host, not '{host}'")
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+                raise ValueError(
+                    f"website_url points to a non-public IP address '{host}'"
+                )
+        except ValueError as exc:
+            if "non-public" in str(exc) or "public host" in str(exc):
+                raise
+            # host is a domain name, not an IP literal — DNS not resolved here
+        return v
 
 
 class GenerationConfig(BaseModel):
@@ -162,6 +188,8 @@ class ReviewResult(BaseModel):
 
 class GeneratedTestSuite(BaseModel):
     """Complete output from the system."""
+    model_config = ConfigDict()
+
     feature_name: str = Field(..., description="Feature being tested")
     generated_at: datetime = Field(default_factory=datetime.now, description="Generation timestamp")
     analysis: PlannerAnalysis = Field(..., description="Planner analysis")
@@ -173,8 +201,3 @@ class GeneratedTestSuite(BaseModel):
     manual_output: str = Field(default="", description="Manual test cases markdown (for UI tab)")
     api_output: str = Field(default="", description="API automation scripts markdown (for UI tab)")
     ui_output: str = Field(default="", description="UI automation scripts markdown (for UI tab)")
-    
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }

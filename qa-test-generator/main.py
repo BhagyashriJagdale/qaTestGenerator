@@ -58,14 +58,23 @@ def cmd_generate(args):
     
     # Run generation
     try:
+        from tools.website_crawler import WebsiteContextFetcher
+        website_fetcher = (
+            WebsiteContextFetcher(timeout=args.crawler_timeout)
+            if args.website_url else None
+        )
+
         result = generate_test_cases(
             requirement_text=requirement_text,
             input_type=args.type,
             project_context=args.context,
             tech_stack=args.tech,
+            additional_context=args.additional_context or None,
             use_rag=not args.no_rag,
             config=config,
             github_repo_url=args.github_repo or None,
+            website_url=args.website_url or None,
+            website_fetcher=website_fetcher,
         )
     except InvalidRequirementError as e:
         console.print(f"\n[bold red]✗ Invalid Requirement[/bold red]")
@@ -200,6 +209,23 @@ Examples:
         "--github-repo",
         metavar="URL",
         help="GitHub repo URL — fetches routes, models, and components to ground test cases in the real codebase"
+    )
+    gen_parser.add_argument(
+        "--website-url",
+        metavar="URL",
+        help="Hosted website URL — crawled for exact Playwright locators and API endpoint URLs"
+    )
+    gen_parser.add_argument(
+        "--crawler-timeout",
+        type=int,
+        default=15,
+        metavar="SECONDS",
+        help="HTTP timeout for website crawl (default: 15s)"
+    )
+    gen_parser.add_argument(
+        "--additional-context",
+        metavar="TEXT",
+        help="Extra domain context passed to the planner (constraints, notes, rules)"
     )
     gen_parser.set_defaults(func=cmd_generate)
     

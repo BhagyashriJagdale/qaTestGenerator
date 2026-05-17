@@ -22,12 +22,14 @@ from agents import (
 from rag import get_rag_system
 from rag.context_scorer import filter_by_relevance
 from tools.github_fetcher import GitHubContextFetcher
+from tools.website_crawler import WebsiteContextFetcher, WebsiteContext
 
 console = Console()
 
 
 MAX_REFINEMENT_LOOPS = 1
-QUALITY_THRESHOLD = 75.0  # stop early if score reaches this
+QUALITY_THRESHOLD = 75.0          # stop early if score reaches this
+_DEDUP_JACCARD_THRESHOLD = 0.65   # token-overlap ratio above which two tests are considered duplicate (DESIGN-4)
 
 
 class TestGeneratorPipeline:
@@ -36,21 +38,24 @@ class TestGeneratorPipeline:
     comprehensive test cases from requirements.
     """
 
-    def __init__(self, use_rag: bool = True):
+    def __init__(self, use_rag: bool = True, website_fetcher: Optional[WebsiteContextFetcher] = None):
         """
         Initialize the pipeline.
-        
+
         Args:
             use_rag: Whether to use RAG for context retrieval
+            website_fetcher: Optional WebsiteContextFetcher instance for injection
+                             (useful in tests to avoid real HTTP calls). (INTEGRATION-1)
         """
         self.use_rag = use_rag
-        
+        self._website_fetcher = website_fetcher
+
         # Initialize agents
         self.planner = PlannerAgent()
         self.generator = GeneratorAgent()
         self.reviewer = ReviewAgent()
         self.formatter = FormatterAgent()
-        
+
         # Initialize RAG if enabled
         self.rag = get_rag_system() if use_rag else None
     
@@ -78,33 +83,57 @@ class TestGeneratorPipeline:
         # Print header
         self._print_header(requirement)
 
-        # Step 0: Fetch GitHub repo context if a URL was provided
+        # Step 0: Fetch external context (GitHub repo and/or website).
+        # website_ctx is a WebsiteContext object kept SEPARATE from tool_context so it
+        # can be injected directly into generator task prompts as structured mandatory
+        # data — not as generic background context (DESIGN-1).
+        caller_tool_context = tool_context  # preserve original caller-supplied context
+        github_ctx = ""
+        website_ctx: Optional[WebsiteContext] = None
+
         if requirement.github_repo_url:
             github_ctx = self._fetch_github_context(requirement.github_repo_url)
-            # Prepend to any caller-supplied tool_context
-            tool_context = (
-                github_ctx + "\n\n" + tool_context if tool_context else github_ctx
-            )
+
+        if requirement.website_url:
+            website_ctx = self._fetch_website_context(requirement.website_url)
+
+        # Planner gets full picture (github + website formatted text) to assess relevance
+        planner_parts = [c for c in [
+            github_ctx,
+            website_ctx.formatted if website_ctx else "",
+            requirement.additional_context or "",  # plumb additional_context (INTEGRATION-3)
+            caller_tool_context or "",
+        ] if c]
+        planner_tool_ctx = "\n\n".join(planner_parts) or None
 
         # Step 1: Planner Agent
         rag_context = None
         if self.use_rag and self.rag:
             rag_context = self._get_initial_rag_context(requirement)
-        
+
         analysis = self.planner.run(
             requirement,
             rag_context=rag_context,
-            tool_context=tool_context,
+            tool_context=planner_tool_ctx,
         )
 
-        # If the codebase doesn't match the requirement, drop it — the generator
-        # would otherwise ground tests in the wrong codebase.
-        if tool_context and not getattr(self.planner, "codebase_relevant", True):
+        # Mismatch check: only applies to GitHub — if the repo is unrelated to the
+        # requirement, drop it.  Website context is NEVER dropped: it IS the live UI.
+        if github_ctx and not getattr(self.planner, "codebase_relevant", True):
             console.print(
                 "[yellow]⚠ GitHub link and requirement are mismatched — "
                 "generating test cases and automation scripts based on requirement input only.[/yellow]"
             )
-            tool_context = None
+            github_ctx = ""  # drop mismatched repo; website_ctx is unaffected
+
+        # Generator tool_context = github (if still relevant) + any caller context.
+        # website_ctx (WebsiteContext object) is passed SEPARATELY so the generator can
+        # inject exact locators/endpoints directly into the task prompt. (DESIGN-1)
+        # NOTE: if website fetch failed on pass 1 (website_ctx is None), refinement
+        # passes also receive None — no retry is attempted. (INTEGRATION-2)
+        generator_tool_ctx = "\n\n".join(
+            c for c in [github_ctx, caller_tool_context] if c
+        ) or None
 
         # Step 2: Get enhanced RAG context based on analysis
         if self.use_rag and self.rag:
@@ -120,7 +149,8 @@ class TestGeneratorPipeline:
             analysis=analysis,
             config=config,
             rag_context=rag_context,
-            tool_context=tool_context
+            tool_context=generator_tool_ctx,
+            website_context=website_ctx,
         )
         
         # Step 4: Guard — skip review and refinement if nothing was generated
@@ -188,8 +218,9 @@ class TestGeneratorPipeline:
                 analysis=analysis,
                 config=refinement_config,
                 rag_context=gap_context,
-                tool_context=tool_context,
-                existing_manual_tests=manual_tests,  # always pass as fallback if regeneration fails
+                tool_context=generator_tool_ctx,
+                website_context=website_ctx,
+                existing_manual_tests=manual_tests,
             )
 
             # Merge and immediately deduplicate to keep the set clean
@@ -298,7 +329,7 @@ class TestGeneratorPipeline:
                 continue
 
             # Jaccard near-duplicate check (token overlap)
-            if any(self._jaccard(norm_title, t) > 0.65 for t in bucket):
+            if any(self._jaccard(norm_title, t) > _DEDUP_JACCARD_THRESHOLD for t in bucket):
                 continue
 
             seen_ids.add(test.test_case_id)
@@ -425,6 +456,15 @@ class TestGeneratorPipeline:
             console.print(f"[yellow]  ⚠ GitHub context fetch failed: {e}[/yellow]")
             return ""
 
+    def _fetch_website_context(self, url: str) -> Optional[WebsiteContext]:
+        """Crawl a hosted website and return a WebsiteContext (None on failure)."""
+        try:
+            fetcher = self._website_fetcher or WebsiteContextFetcher()
+            return fetcher.fetch(url)
+        except Exception as e:
+            console.print(f"[yellow]  ⚠ Website context fetch failed: {e}[/yellow]")
+            return None
+
     def _get_initial_rag_context(self, requirement: RequirementInput) -> str:
         """Get relevance-filtered initial RAG context based on requirement."""
         if not self.rag:
@@ -494,13 +534,18 @@ File: {test.file_name}
             f"\n[cyan]GitHub Repo:[/cyan] {requirement.github_repo_url}"
             if requirement.github_repo_url else ""
         )
+        website_line = (
+            f"\n[cyan]Website URL:[/cyan] {requirement.website_url}"
+            if requirement.website_url else ""
+        )
         console.print("\n")
         console.print(Panel(
             f"[bold white]QA TEST CASE GENERATOR[/bold white]\n\n"
             f"[cyan]Input Type:[/cyan] {requirement.input_type.value}\n"
             f"[cyan]Content Length:[/cyan] {len(requirement.content)} characters\n"
             f"[cyan]RAG Enabled:[/cyan] {self.use_rag}"
-            f"{github_line}",
+            f"{github_line}"
+            f"{website_line}",
             title="🧪 Starting Pipeline",
             border_style="blue"
         ))
@@ -533,9 +578,12 @@ def generate_test_cases(
     input_type: str = "plain_text",
     project_context: Optional[str] = None,
     tech_stack: Optional[str] = None,
+    additional_context: Optional[str] = None,
     use_rag: bool = True,
     config: Optional[GenerationConfig] = None,
     github_repo_url: Optional[str] = None,
+    website_url: Optional[str] = None,
+    website_fetcher=None,
 ) -> GeneratedTestSuite:
     """
     Convenience function to generate test cases.
@@ -549,6 +597,8 @@ def generate_test_cases(
         config: Optional generation config
         github_repo_url: Optional GitHub repo URL — fetches routes, models, and
                          components so tests are grounded in the real codebase
+        website_url: Optional hosted website URL — crawled for exact Playwright
+                     locators and API endpoint URLs
 
     Returns:
         GeneratedTestSuite with all outputs
@@ -565,9 +615,10 @@ def generate_test_cases(
         input_type=parsed_type,
         project_context=project_context,
         tech_stack=tech_stack,
+        additional_context=additional_context,
         github_repo_url=github_repo_url,
+        website_url=website_url,
     )
-    
-    # Run pipeline
-    pipeline = TestGeneratorPipeline(use_rag=use_rag)
+
+    pipeline = TestGeneratorPipeline(use_rag=use_rag, website_fetcher=website_fetcher)
     return pipeline.run(requirement, config=config)

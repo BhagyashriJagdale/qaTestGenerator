@@ -3,12 +3,14 @@ FastAPI server for the QA Test Case Generator.
 Provides REST API endpoints for test case generation.
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import ipaddress
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import datetime
+from urllib.parse import urlparse
 import asyncio
 import uuid
 
@@ -22,6 +24,9 @@ from core.models import (
 from pipeline import TestGeneratorPipeline, RequirementInput
 from rag import get_rag_system
 from agents.planner_agent import InvalidRequirementError, IncompleteRequirementError
+from tools.website_crawler import WebsiteContextFetcher
+from api.auth import get_current_user
+import db.repository as repo
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -44,6 +49,10 @@ app.add_middleware(
 )
 
 import logging
+
+# Mount project management routes
+from api.projects import router as projects_router
+app.include_router(projects_router)
 
 # In-memory job storage — jobs are lost on server restart.
 # For production, replace with Redis or a database-backed store.
@@ -68,9 +77,21 @@ class GenerateRequest(BaseModel):
     input_type: str = Field(default="plain_text", description="Type of input")
     project_context: Optional[str] = Field(default=None, description="Project context")
     tech_stack: Optional[str] = Field(default=None, description="Technology stack")
+    project_id: Optional[str] = Field(
+        default=None,
+        description="Project ID — when provided the requirement, test suite, and execution log are saved to the project"
+    )
     github_repo_url: Optional[str] = Field(
         default=None,
         description="GitHub repository URL — the pipeline fetches routes, models, and components to ground test cases in the actual codebase"
+    )
+    website_url: Optional[str] = Field(
+        default=None,
+        description="Hosted website URL — crawled for exact Playwright locators and API endpoint URLs to ground UI/API test generation"
+    )
+    additional_context: Optional[str] = Field(
+        default=None,
+        description="Any extra context to pass to the planner (domain rules, constraints, notes)"
     )
     include_manual: bool = Field(default=True, description="Generate manual tests")
     include_api: bool = Field(default=True, description="Generate API tests")
@@ -80,6 +101,30 @@ class GenerateRequest(BaseModel):
         description="Scenario types to cover"
     )
     use_rag: bool = Field(default=True, description="Use RAG for context")
+    crawler_timeout: int = Field(default=15, description="HTTP timeout in seconds for website crawl")
+
+    @field_validator("website_url")
+    @classmethod
+    def validate_website_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("website_url must start with http:// or https://")
+        # C-1: SSRF guard — reject obvious private/loopback targets
+        host = (urlparse(v).hostname or "").lower()
+        if host in ("localhost", "localhost.localdomain"):
+            raise ValueError(f"website_url must point to a public host, not '{host}'")
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+                raise ValueError(
+                    f"website_url points to a non-public IP address '{host}'"
+                )
+        except ValueError as exc:
+            if "non-public" in str(exc) or "public host" in str(exc):
+                raise
+            # host is a domain name, not an IP literal — DNS not resolved here
+        return v
 
 
 class GenerateResponse(BaseModel):
@@ -146,18 +191,29 @@ async def health_check():
 
 
 @app.post("/generate", response_model=GenerateResponse)
-async def generate_test_cases(request: GenerateRequest):
+async def generate_test_cases(
+    request: GenerateRequest,
+    authorization: Optional[str] = Header(None),
+):
     """
     Generate test cases from a requirement.
-    This is a synchronous endpoint - for large requests, use /generate/async
+    Pass Authorization: Bearer <token> + project_id to persist results to the project.
     """
     try:
+        # Resolve authenticated user when an auth header is provided
+        user_id: Optional[str] = None
+        if authorization and request.project_id:
+            try:
+                user_id = await get_current_user(authorization)
+            except HTTPException:
+                pass  # auth failure is non-fatal for generation; project save will be skipped
+
         # Parse input type
         try:
             input_type = InputType(request.input_type)
         except ValueError:
             input_type = InputType.PLAIN_TEXT
-        
+
         # Parse scenarios
         scenarios = []
         for s in request.scenarios:
@@ -166,31 +222,59 @@ async def generate_test_cases(request: GenerateRequest):
             except ValueError:
                 pass
         if not scenarios:
-            scenarios = [
-                ScenarioType.HAPPY_PATH,
-                ScenarioType.NEGATIVE,
-                ScenarioType.EDGE_CASE
-            ]
-        
-        # Create requirement
+            scenarios = [ScenarioType.HAPPY_PATH, ScenarioType.NEGATIVE, ScenarioType.EDGE_CASE]
+
+        # Save requirement to project if project_id + auth provided
+        requirement_id: Optional[str] = None
+        log_id: Optional[str] = None
+        job_id = str(uuid.uuid4())
+
+        if request.project_id and user_id:
+            try:
+                req_record = repo.save_requirement(
+                    project_id=request.project_id,
+                    user_id=user_id,
+                    content=request.requirement,
+                    input_type=request.input_type,
+                    project_context=request.project_context,
+                    tech_stack=request.tech_stack,
+                    additional_context=request.additional_context,
+                    github_repo_url=request.github_repo_url,
+                    website_url=request.website_url,
+                )
+                requirement_id = req_record["id"]
+                log_record = repo.create_log(
+                    project_id=request.project_id,
+                    user_id=user_id,
+                    job_id=job_id,
+                    requirement_id=requirement_id,
+                )
+                log_id = log_record["id"]
+            except Exception:
+                pass  # DB failure must not block generation
+
+        # Create pipeline inputs
         requirement = RequirementInput(
             content=request.requirement,
             input_type=input_type,
             project_context=request.project_context,
             tech_stack=request.tech_stack,
+            additional_context=request.additional_context or None,
             github_repo_url=request.github_repo_url or None,
+            website_url=request.website_url or None,
         )
-
-        # Create config
         config = GenerationConfig(
             include_manual=request.include_manual,
             include_api=request.include_api,
             include_ui=request.include_ui,
-            scenarios=scenarios
+            scenarios=scenarios,
         )
 
         # Run pipeline in a thread so the async event loop is not blocked
-        pipeline = TestGeneratorPipeline(use_rag=request.use_rag)
+        website_fetcher = (
+            WebsiteContextFetcher(timeout=request.crawler_timeout) if request.website_url else None
+        )
+        pipeline = TestGeneratorPipeline(use_rag=request.use_rag, website_fetcher=website_fetcher)
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, pipeline.run, requirement, config)
 
@@ -201,8 +285,35 @@ async def generate_test_cases(request: GenerateRequest):
         )
         final_score = result.review.final_score if result.review else 0.0
 
+        # Persist test suite and close execution log
+        if request.project_id and user_id:
+            try:
+                suite_record = repo.save_test_suite(
+                    project_id=request.project_id,
+                    user_id=user_id,
+                    requirement_id=requirement_id,
+                    feature_name=result.feature_name,
+                    total_test_cases=total,
+                    quality_score=final_score,
+                    manual_output=result.manual_output,
+                    api_output=result.api_output,
+                    ui_output=result.ui_output,
+                    markdown_output=result.markdown_output,
+                )
+                if log_id:
+                    repo.complete_log(
+                        log_id=log_id,
+                        status="completed",
+                        feature_name=result.feature_name,
+                        total_test_cases=total,
+                        quality_score=final_score,
+                        test_suite_id=suite_record["id"],
+                    )
+            except Exception:
+                pass  # DB failure must not break the response
+
         return GenerateResponse(
-            job_id=str(uuid.uuid4()),
+            job_id=job_id,
             status="completed",
             feature_name=result.feature_name,
             total_test_cases=total,
@@ -215,8 +326,18 @@ async def generate_test_cases(request: GenerateRequest):
         )
 
     except InvalidRequirementError as e:
+        if log_id:
+            try:
+                repo.complete_log(log_id=log_id, status="failed", error_message=str(e))
+            except Exception:
+                pass
         raise HTTPException(status_code=422, detail={"error": "invalid_requirement", "message": str(e)})
     except IncompleteRequirementError as e:
+        if log_id:
+            try:
+                repo.complete_log(log_id=log_id, status="failed", error_message=str(e))
+            except Exception:
+                pass
         raise HTTPException(status_code=422, detail={
             "error": "incomplete_requirement",
             "message": str(e),
@@ -225,35 +346,44 @@ async def generate_test_cases(request: GenerateRequest):
             "suggestion": e.suggestion,
         })
     except Exception as e:
+        if log_id:
+            try:
+                repo.complete_log(log_id=log_id, status="failed", error_message=str(e))
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/generate/async", response_model=JobStatus)
 async def generate_test_cases_async(
     request: GenerateRequest,
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None),
 ):
     """
     Generate test cases asynchronously.
     Returns a job ID that can be polled for status.
+    Pass Authorization: Bearer <token> + project_id to persist results to the project.
     """
+    # Resolve user for project persistence (non-fatal if missing/invalid)
+    user_id: Optional[str] = None
+    if authorization and request.project_id:
+        try:
+            user_id = await get_current_user(authorization)
+        except HTTPException:
+            pass
+
     job_id = str(uuid.uuid4())
-    
-    # Initialize job
+
     jobs[job_id] = {
         "status": "pending",
         "progress": 0,
         "result": None,
         "error": None,
-        "created_at": datetime.now()
+        "created_at": datetime.now(),
     }
-    
-    # Add background task
-    background_tasks.add_task(
-        _run_generation_job,
-        job_id,
-        request
-    )
+
+    background_tasks.add_task(_run_generation_job, job_id, request, user_id)
     
     return JobStatus(
         job_id=job_id,
@@ -322,8 +452,15 @@ async def get_knowledge_stats():
 # BACKGROUND TASKS
 # ============================================
 
-async def _run_generation_job(job_id: str, request: GenerateRequest):
+async def _run_generation_job(
+    job_id: str,
+    request: GenerateRequest,
+    user_id: Optional[str] = None,
+):
     """Run generation job in background thread so the event loop stays free."""
+    log_id: Optional[str] = None
+    requirement_id: Optional[str] = None
+
     try:
         jobs[job_id]["status"] = "running"
         jobs[job_id]["progress"] = 5
@@ -342,12 +479,39 @@ async def _run_generation_job(job_id: str, request: GenerateRequest):
 
         jobs[job_id]["progress"] = 10
 
+        # Persist requirement + open execution log for the project
+        if request.project_id and user_id:
+            try:
+                req_record = repo.save_requirement(
+                    project_id=request.project_id,
+                    user_id=user_id,
+                    content=request.requirement,
+                    input_type=request.input_type,
+                    project_context=request.project_context,
+                    tech_stack=request.tech_stack,
+                    additional_context=request.additional_context,
+                    github_repo_url=request.github_repo_url,
+                    website_url=request.website_url,
+                )
+                requirement_id = req_record["id"]
+                log_record = repo.create_log(
+                    project_id=request.project_id,
+                    user_id=user_id,
+                    job_id=job_id,
+                    requirement_id=requirement_id,
+                )
+                log_id = log_record["id"]
+            except Exception:
+                pass
+
         requirement = RequirementInput(
             content=request.requirement,
             input_type=input_type,
             project_context=request.project_context,
             tech_stack=request.tech_stack,
+            additional_context=request.additional_context or None,
             github_repo_url=request.github_repo_url or None,
+            website_url=request.website_url or None,
         )
         config = GenerationConfig(
             include_manual=request.include_manual,
@@ -358,16 +522,17 @@ async def _run_generation_job(job_id: str, request: GenerateRequest):
 
         jobs[job_id]["progress"] = 15
 
-        def _progress(pct: int):
-            jobs[job_id]["progress"] = pct
-
         # Run pipeline in a thread — each LLM call is blocking I/O
-        pipeline = TestGeneratorPipeline(use_rag=request.use_rag)
+        website_fetcher = (
+            WebsiteContextFetcher(timeout=request.crawler_timeout)
+            if request.website_url else None
+        )
+        pipeline = TestGeneratorPipeline(use_rag=request.use_rag, website_fetcher=website_fetcher)
         loop = asyncio.get_running_loop()
 
-        _progress(20)  # planning
+        jobs[job_id]["progress"] = 20
         result = await loop.run_in_executor(None, pipeline.run, requirement, config)
-        _progress(90)  # formatting done
+        jobs[job_id]["progress"] = 90
 
         total = (
             len(result.manual_test_cases) +
@@ -375,6 +540,33 @@ async def _run_generation_job(job_id: str, request: GenerateRequest):
             len(result.ui_test_cases)
         )
         final_score = result.review.final_score if result.review else 0.0
+
+        # Persist test suite + close log
+        if request.project_id and user_id:
+            try:
+                suite_record = repo.save_test_suite(
+                    project_id=request.project_id,
+                    user_id=user_id,
+                    requirement_id=requirement_id,
+                    feature_name=result.feature_name,
+                    total_test_cases=total,
+                    quality_score=final_score,
+                    manual_output=result.manual_output,
+                    api_output=result.api_output,
+                    ui_output=result.ui_output,
+                    markdown_output=result.markdown_output,
+                )
+                if log_id:
+                    repo.complete_log(
+                        log_id=log_id,
+                        status="completed",
+                        feature_name=result.feature_name,
+                        total_test_cases=total,
+                        quality_score=final_score,
+                        test_suite_id=suite_record["id"],
+                    )
+            except Exception:
+                pass
 
         jobs[job_id]["result"] = GenerateResponse(
             job_id=job_id,
@@ -391,15 +583,15 @@ async def _run_generation_job(job_id: str, request: GenerateRequest):
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["progress"] = 100
 
-    except InvalidRequirementError as e:
+    except (InvalidRequirementError, IncompleteRequirementError, Exception) as e:
+        error_msg = str(e)
         jobs[job_id]["status"] = "failed"
-        jobs[job_id]["error"] = f"Invalid requirement: {e}"
-    except IncompleteRequirementError as e:
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["error"] = f"Incomplete requirement: {e}"
-    except Exception as e:
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["error"] = str(e)
+        jobs[job_id]["error"] = error_msg
+        if log_id:
+            try:
+                repo.complete_log(log_id=log_id, status="failed", error_message=error_msg)
+            except Exception:
+                pass
 
 
 # ============================================

@@ -29,6 +29,9 @@ pyvenv.cfg
 # Data / vector store
 qa-test-generator/data/chroma/
 
+# Generated test output
+tests/
+
 # Archives
 *.zip
 

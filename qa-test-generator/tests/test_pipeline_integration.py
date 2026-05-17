@@ -3,6 +3,7 @@
 import pytest
 from unittest.mock import MagicMock, patch, call
 from datetime import datetime
+from tools.website_crawler import WebsiteContext
 from core.models import (
     RequirementInput,
     GenerationConfig,
@@ -86,6 +87,19 @@ def _config():
 
 # ── pipeline factory ──────────────────────────────────────────────────────────
 
+def _make_website_ctx(**kwargs) -> WebsiteContext:
+    defaults = dict(
+        url="https://myapp.com/login",
+        title="Login",
+        locators=["[data-testid='email']", "#password"],
+        api_urls=["/api/auth/login"],
+        form_actions=["/api/auth/login"],
+        formatted="## Login\nLocators: ...",
+    )
+    defaults.update(kwargs)
+    return WebsiteContext(**defaults)
+
+
 def _make_pipeline(
     *,
     analysis=None,
@@ -93,6 +107,7 @@ def _make_pipeline(
     api=None,
     ui=None,
     review=None,
+    website_fetcher=None,
 ):
     """Create a TestGeneratorPipeline with all agents replaced by MagicMocks."""
     analysis = analysis or _analysis()
@@ -122,7 +137,7 @@ def _make_pipeline(
          patch("pipeline.FormatterAgent", return_value=mock_formatter), \
          patch("pipeline.get_rag_system"):
         from pipeline import TestGeneratorPipeline
-        p = TestGeneratorPipeline(use_rag=False)
+        p = TestGeneratorPipeline(use_rag=False, website_fetcher=website_fetcher)
         # Replace the already-instantiated agents with our mocks
         p.planner = mock_planner
         p.generator = mock_generator
@@ -264,3 +279,70 @@ def test_run_deduplicates_identical_ids():
     p, *_ = _make_pipeline(manual=manual, api=[], ui=[])
     result = p.run(_req(), _config())
     assert len(result.manual_test_cases) == 1
+
+
+# ── run() — website URL path (MISSING-7) ─────────────────────────────────────
+
+def _req_with_website(url="https://myapp.com/login"):
+    return RequirementInput(
+        content="User can log in with valid email and password.",
+        website_url=url,
+    )
+
+
+def test_run_calls_fetch_website_context_when_website_url_set():
+    mock_fetcher = MagicMock()
+    mock_fetcher.fetch.return_value = _make_website_ctx()
+
+    p, _, mock_generator, _, _ = _make_pipeline(website_fetcher=mock_fetcher)
+    p.run(_req_with_website(), _config())
+
+    mock_fetcher.fetch.assert_called_once_with("https://myapp.com/login")
+
+
+def test_run_does_not_call_fetch_when_no_website_url():
+    mock_fetcher = MagicMock()
+    p, *_ = _make_pipeline(website_fetcher=mock_fetcher)
+    p.run(_req(), _config())
+    mock_fetcher.fetch.assert_not_called()
+
+
+def test_run_passes_website_context_to_generator():
+    ctx = _make_website_ctx()
+    mock_fetcher = MagicMock()
+    mock_fetcher.fetch.return_value = ctx
+
+    p, _, mock_generator, _, _ = _make_pipeline(website_fetcher=mock_fetcher)
+    p.run(_req_with_website(), _config())
+
+    call_kwargs = mock_generator.run.call_args.kwargs
+    assert call_kwargs.get("website_context") is ctx
+
+
+def test_run_passes_none_website_context_when_no_url():
+    p, _, mock_generator, _, _ = _make_pipeline()
+    p.run(_req(), _config())
+
+    call_kwargs = mock_generator.run.call_args.kwargs
+    assert call_kwargs.get("website_context") is None
+
+
+def test_run_handles_fetch_failure_gracefully():
+    mock_fetcher = MagicMock()
+    mock_fetcher.fetch.side_effect = Exception("Connection refused")
+
+    p, _, mock_generator, _, _ = _make_pipeline(website_fetcher=mock_fetcher)
+    # Should not raise; fetch failure is handled internally
+    result = p.run(_req_with_website(), _config())
+    assert isinstance(result, GeneratedTestSuite)
+
+
+def test_run_passes_none_website_context_on_fetch_failure():
+    mock_fetcher = MagicMock()
+    mock_fetcher.fetch.side_effect = RuntimeError("Timeout")
+
+    p, _, mock_generator, _, _ = _make_pipeline(website_fetcher=mock_fetcher)
+    p.run(_req_with_website(), _config())
+
+    call_kwargs = mock_generator.run.call_args.kwargs
+    assert call_kwargs.get("website_context") is None
