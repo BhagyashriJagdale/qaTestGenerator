@@ -45,30 +45,32 @@ class RAGSystem:
         self._collection = None
         self._embedding_model = None
         self._initialized = False
-    
+        self._init_attempted = False
+
     def _lazy_init(self):
-        """Initialize ChromaDB and embedding model lazily."""
-        if self._initialized:
+        """Initialize ChromaDB and embedding model lazily. Attempts only once."""
+        if self._initialized or self._init_attempted:
             return
-        
+        self._init_attempted = True
+
         try:
             chromadb = _get_chromadb()
             SentenceTransformer = _get_sentence_transformer()
-            
+
             # Create persist directory if needed
             os.makedirs(self.settings.chroma_persist_dir, exist_ok=True)
-            
+
             # Initialize ChromaDB
             self._client = chromadb.PersistentClient(
                 path=self.settings.chroma_persist_dir
             )
-            
+
             # Get or create collection
             self._collection = self._client.get_or_create_collection(
                 name="qa_knowledge_base",
                 metadata={"description": "QA test cases and domain knowledge"}
             )
-            
+
             # Initialize embedding model — prefer local cache, fall back to download once
             try:
                 self._embedding_model = SentenceTransformer(
@@ -78,10 +80,10 @@ class RAGSystem:
             except Exception:
                 console.print(f"[yellow]Embedding model not cached — downloading once: {self.settings.embedding_model}[/yellow]")
                 self._embedding_model = SentenceTransformer(self.settings.embedding_model)
-            
+
             self._initialized = True
             console.print("[green]✓ RAG system initialized[/green]")
-            
+
         except ImportError as e:
             console.print(f"[yellow]⚠ RAG dependencies not installed: {e}[/yellow]")
             console.print("[yellow]  RAG features are disabled — install chromadb and sentence-transformers to enable.[/yellow]")
