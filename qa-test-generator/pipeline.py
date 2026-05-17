@@ -27,7 +27,7 @@ from tools.website_crawler import WebsiteContextFetcher, WebsiteContext
 console = Console()
 
 
-MAX_REFINEMENT_LOOPS = 1
+MAX_REFINEMENT_LOOPS = 2
 QUALITY_THRESHOLD = 75.0          # stop early if score reaches this
 _DEDUP_JACCARD_THRESHOLD = 0.65   # token-overlap ratio above which two tests are considered duplicate (DESIGN-4)
 
@@ -401,6 +401,7 @@ class TestGeneratorPipeline:
         existing_ui: list | None = None,
     ) -> str:
         """Format review gaps/issues into a concise context string — cap to avoid prompt bloat."""
+        import re as _re
         top_gaps = gaps[:5]
         top_issues = issues[:5]
         lines = [f"### REFINEMENT PASS {iteration} — fill these specific gaps ONLY:"]
@@ -409,6 +410,22 @@ class TestGeneratorPipeline:
         if top_issues:
             lines.append("Issues: " + "; ".join(top_issues))
         lines.append("Generate ONLY the missing test cases. Do NOT regenerate any existing test.")
+
+        # Extract manual test IDs that explicitly need automation coverage and state the
+        # ask directly — "MTC-003 has no automation counterpart" is easy to miss; an
+        # explicit "write API + UI tests for MTC-003, MTC-004" is not.
+        automation_gap_ids = list(dict.fromkeys(
+            m
+            for gap in gaps
+            if "automation" in gap.lower() or "counterpart" in gap.lower()
+            for m in _re.findall(r"MTC-[\w-]+", gap)
+        ))
+        if automation_gap_ids:
+            lines.append(
+                "\nAUTOMATION REQUIRED — write BOTH an API test (ATC-xxx) AND a UI test (UTC-xxx) "
+                "for each of these manual test IDs that currently have no automation: "
+                + ", ".join(automation_gap_ids)
+            )
 
         # List existing IDs+scenarios so the LLM doesn't recreate them
         def _summarise(tests: list) -> str:
