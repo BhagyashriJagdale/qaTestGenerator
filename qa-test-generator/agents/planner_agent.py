@@ -116,6 +116,19 @@ class PlannerAgent(BaseAgent):
                     "[cyan]ℹ Requirement appears incomplete in isolation, but codebase context "
                     "is available — proceeding with analysis.[/cyan]"
                 )
+                # The LLM returned the is_complete=false shape (no analysis fields) despite the
+                # prompt telling it not to. Re-prompt once, explicitly requiring the full analysis.
+                if "feature_name" not in result:
+                    console.print("[yellow]  Re-prompting for full analysis...[/yellow]")
+                    result = self._generate_json(
+                        full_message
+                        + "\n\nCRITICAL OVERRIDE: You MUST return the FULL analysis JSON with "
+                        "feature_name, domain, intent, scope, tech_stack, endpoints, "
+                        "ui_elements, dependencies, and test_focus_areas. "
+                        "Set is_complete=true — the codebase context above fills in all gaps. "
+                        "Do NOT return is_complete=false.",
+                        temperature=0.1,
+                    )
             else:
                 issues = result.get("completeness_issues", ["Requirement lacks sufficient detail."])
                 missing = result.get("missing_information", [])
