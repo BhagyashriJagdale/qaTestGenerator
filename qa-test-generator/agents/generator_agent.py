@@ -23,8 +23,8 @@ from rich.console import Console
 
 console = Console()
 
-# Token budget per call — capped to DeepSeek's effective output window (~4096 tokens)
-_TOKENS_PER_CALL = 4000
+# Token budget per call — DeepSeek/OpenAI support up to 8192 output tokens
+_TOKENS_PER_CALL = 8000
 
 
 class GeneratorAgent(BaseAgent):

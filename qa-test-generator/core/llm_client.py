@@ -101,7 +101,13 @@ class OpenAIClient(BaseLLMClient):
         if self._use_json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         response = self.client.chat.completions.create(**kwargs)
-        return _parse_json_safe(response.choices[0].message.content)
+        choice = response.choices[0]
+        if choice.finish_reason == "length":
+            raise ValueError(
+                f"Response truncated at max_tokens={max_tokens or self.max_tokens}; "
+                "JSON fields may be cut off. Retrying for a more concise response."
+            )
+        return _parse_json_safe(choice.message.content)
 
     @retry(**_RETRY_KWARGS)
     def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
@@ -149,6 +155,11 @@ class ClaudeClient(BaseLLMClient):
             messages=[{"role": "user", "content": user_message}],
             temperature=temperature,
         )
+        if response.stop_reason == "max_tokens":
+            raise ValueError(
+                f"Response truncated at max_tokens={max_tokens or self.max_tokens}; "
+                "JSON fields may be cut off. Retrying for a more concise response."
+            )
         return _parse_json_safe(response.content[0].text)
 
     @retry(**_RETRY_KWARGS)
@@ -215,7 +226,13 @@ class DeepSeekClient(BaseLLMClient):
                 {"role": "user", "content": user_message},
             ],
         )
-        return _parse_json_safe(response.choices[0].message.content)
+        choice = response.choices[0]
+        if choice.finish_reason == "length":
+            raise ValueError(
+                f"Response truncated at max_tokens={max_tokens or self.max_tokens}; "
+                "JSON fields may be cut off. Retrying for a more concise response."
+            )
+        return _parse_json_safe(choice.message.content)
 
     @retry(**_RETRY_KWARGS_DEEPSEEK)
     def generate_with_context(self, system_prompt, messages, temperature=0.7, max_tokens=None) -> str:
